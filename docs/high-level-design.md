@@ -329,9 +329,9 @@ Goal: produce structured plans before edits.
 
 Steps:
 
-1. Add a plan prompt.
-2. Return a plan with implementation, validation, risks, and confidence.
-3. Keep output stable enough to compare across models.
+1. Add a plan prompt. Done.
+2. Return a plan with implementation, validation, risks, and confidence. Done.
+3. Keep output stable enough to compare across models. Done.
 
 Learning outcome:
 

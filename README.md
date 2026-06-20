@@ -207,7 +207,13 @@ Milestone 2 is in place:
 - Context selection reasons are included in the prompt for easier debugging.
 - `ask` sends selected repository context to the configured model.
 
-The CLI does not edit files yet. Planning comes next in Milestone 3.
+Milestone 3 is in place:
+
+- `plan` sends the change request and selected repository context to the configured model.
+- Plan mode asks for summary, relevant files, implementation steps, validation steps, risks, and confidence score.
+- Plan mode remains read-only.
+
+The CLI does not edit files yet. Patch application comes next in Milestone 4.
 
 ## Design Principles
 

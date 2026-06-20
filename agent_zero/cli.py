@@ -17,6 +17,19 @@ Be clear about what the context does and does not show.
 Do not claim you edited files or ran validation.
 When useful, mention relevant file paths from the context."""
 
+PLAN_SYSTEM_PROMPT = """You are Agent Zero in plan mode.
+Inspect the provided repository context and produce a structured implementation plan.
+Do not edit files. Do not claim you ran validation.
+Prefer current code evidence over future-looking documentation when they conflict.
+
+Return the plan with these sections:
+1. Summary
+2. Relevant Files
+3. Implementation Steps
+4. Validation Steps
+5. Risks And Unknowns
+6. Confidence Score"""
+
 
 def _load_config_or_exit(env_file: Path | None):
     try:
@@ -40,30 +53,15 @@ def _run_stub(mode: str, task: str, env_file: Path | None) -> None:
     typer.echo(f"Status: {mode} mode arrives in a later milestone.")
 
 
-@app.command()
-def ask(
-    task: str = typer.Argument(..., help="Question to answer about the repository."),
-    env_file: Path | None = typer.Option(
-        None,
-        "--env-file",
-        help="Optional path to a .env file.",
-    ),
-) -> None:
-    """Answer a repo-aware question without editing files."""
-    config = _load_config_or_exit(env_file)
-    client = create_model_client(config)
+def _build_user_prompt(task_label: str, task: str) -> str:
     repository_context = build_repository_context(Path.cwd(), task)
-    user_prompt = (
-        f"User question:\n{task}\n\n"
+    return (
+        f"{task_label}:\n{task}\n\n"
         f"Repository context:\n{repository_context.to_prompt()}"
     )
 
-    try:
-        response = client.complete(ASK_SYSTEM_PROMPT, user_prompt)
-    except ModelClientError as exc:
-        typer.secho(f"Model call failed: {exc}", fg=typer.colors.RED, err=True)
-        raise typer.Exit(code=1) from exc
 
+def _print_model_response(response) -> None:
     typer.echo(response.content)
 
     if response.total_tokens is not None:
@@ -76,6 +74,32 @@ def ask(
         )
 
 
+def _complete_or_exit(system_prompt: str, user_prompt: str, env_file: Path | None):
+    config = _load_config_or_exit(env_file)
+    client = create_model_client(config)
+
+    try:
+        return client.complete(system_prompt, user_prompt)
+    except ModelClientError as exc:
+        typer.secho(f"Model call failed: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
+
+
+@app.command()
+def ask(
+    task: str = typer.Argument(..., help="Question to answer about the repository."),
+    env_file: Path | None = typer.Option(
+        None,
+        "--env-file",
+        help="Optional path to a .env file.",
+    ),
+) -> None:
+    """Answer a repo-aware question without editing files."""
+    user_prompt = _build_user_prompt("User question", task)
+    response = _complete_or_exit(ASK_SYSTEM_PROMPT, user_prompt, env_file)
+    _print_model_response(response)
+
+
 @app.command()
 def plan(
     task: str = typer.Argument(..., help="Change request to plan."),
@@ -86,7 +110,9 @@ def plan(
     ),
 ) -> None:
     """Inspect and produce an implementation plan."""
-    _run_stub("plan", task, env_file)
+    user_prompt = _build_user_prompt("Change request", task)
+    response = _complete_or_exit(PLAN_SYSTEM_PROMPT, user_prompt, env_file)
+    _print_model_response(response)
 
 
 @app.command()
