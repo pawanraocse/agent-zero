@@ -131,7 +131,6 @@ First version:
 Later versions:
 
 - ignore large or generated files
-- rank files by relevance
 - track token budget
 - summarize large files
 - include previous tool results
@@ -317,7 +316,8 @@ Steps:
 2. Add a safe text file reader. Done.
 3. Add search. Done.
 4. Include selected context in `ask` mode. Done.
-5. Select context based on question intent. Done.
+5. Rank context using query terms, search hits, path priority, and overview priors. Done.
+6. Include context selection reasons in the model prompt. Done.
 
 Learning outcome:
 

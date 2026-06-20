@@ -203,7 +203,8 @@ Milestone 2 is in place:
 - Read-only repository file listing.
 - Safe text file reads that ignore secrets, caches, virtualenvs, and IDE files.
 - Simple text search over repository files.
-- Query-aware context selection for overview, implementation, config, tests, and docs questions.
+- Query-aware context ranking using path matches, content search hits, and small overview priors.
+- Context selection reasons are included in the prompt for easier debugging.
 - `ask` sends selected repository context to the configured model.
 
 The CLI does not edit files yet. Planning comes next in Milestone 3.
