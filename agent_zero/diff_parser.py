@@ -2,6 +2,19 @@ class DiffExtractionError(RuntimeError):
     """Raised when a model response does not contain a unified diff."""
 
 
+NO_CHANGE_PHRASES = (
+    "already contains",
+    "already exists",
+    "already present",
+    "already satisfied",
+    "no change needed",
+    "no changes needed",
+    "no modification needed",
+    "nothing to change",
+    "nothing to do",
+)
+
+
 def extract_unified_diff(text: str) -> str:
     """Extract unified diff text from a model response."""
     fenced = _extract_fenced_diff(text)
@@ -17,6 +30,11 @@ def extract_unified_diff(text: str) -> str:
         return text[file_header_start:].strip() + "\n"
 
     raise DiffExtractionError("Model response did not contain a unified diff.")
+
+
+def is_no_change_response(text: str) -> bool:
+    lowered = text.lower()
+    return any(phrase in lowered for phrase in NO_CHANGE_PHRASES)
 
 
 def _extract_fenced_diff(text: str) -> str | None:

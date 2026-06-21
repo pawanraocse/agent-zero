@@ -4,7 +4,11 @@ import typer
 
 from agent_zero.config import ConfigError, load_config
 from agent_zero.context import build_repository_context
-from agent_zero.diff_parser import DiffExtractionError, extract_unified_diff
+from agent_zero.diff_parser import (
+    DiffExtractionError,
+    extract_unified_diff,
+    is_no_change_response,
+)
 from agent_zero.model_client import ModelClientError, create_model_client
 from agent_zero.tools.command_tool import CommandRunError, CommandResult, run_command
 from agent_zero.tools.patch_tool import PatchApplyError, apply_unified_diff
@@ -156,6 +160,10 @@ def code(
         diff_text = extract_unified_diff(response.content)
         patch_result = apply_unified_diff(Path.cwd(), diff_text)
     except DiffExtractionError as exc:
+        if is_no_change_response(response.content):
+            typer.echo("No changes applied.")
+            typer.echo(response.content)
+            return
         typer.secho(f"Could not find a patch: {exc}", fg=typer.colors.RED, err=True)
         typer.echo(response.content)
         raise typer.Exit(code=1) from exc

@@ -232,7 +232,7 @@ diff --git a/hello.txt b/hello.txt
     assert "Change request:\nChange old to new" in user_prompt
 
 
-def test_code_command_reports_missing_diff(tmp_path, monkeypatch):
+def test_code_command_treats_no_change_response_as_success(tmp_path, monkeypatch):
     env_file = tmp_path / ".env"
     env_file.write_text(
         "\n".join(
@@ -255,9 +255,37 @@ def test_code_command_reports_missing_diff(tmp_path, monkeypatch):
         ["code", "Change something", "--env-file", str(env_file)],
     )
 
+    assert result.exit_code == 0
+    assert "No changes applied." in result.output
+    assert "No changes needed." in result.output
+
+
+def test_code_command_reports_missing_diff_when_not_noop(tmp_path, monkeypatch):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "AGENT_ZERO_BASE_URL=http://localhost:1234/v1",
+                "AGENT_ZERO_API_KEY=test-key",
+                "AGENT_ZERO_MODEL=test-model",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    fake_client = FakeModelClient(ModelResponse(content="I cannot do that safely."))
+    monkeypatch.setattr(cli, "create_model_client", lambda config: fake_client)
+    monkeypatch.chdir(tmp_path)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        ["code", "Change something", "--env-file", str(env_file)],
+    )
+
     assert result.exit_code == 1
     assert "Could not find a patch" in result.output
-    assert "No changes needed." in result.output
+    assert "I cannot do that safely." in result.output
 
 
 def test_code_command_reports_patch_failure(tmp_path, monkeypatch):
