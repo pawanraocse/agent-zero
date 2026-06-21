@@ -1,5 +1,7 @@
 # Agent Zero
 
+Agent Zero is an educational tool for learning about AI-assisted code generation and repository automation.
+
 Agent Zero is a small coding agent built from scratch to understand how agentic coding systems work under the hood.
 
 This is not meant to compete with Claude Code, Codex, Cursor, or other full-featured coding agents. The point is to learn the basic loop by building it directly:
@@ -213,7 +215,20 @@ Milestone 3 is in place:
 - Plan mode asks for summary, relevant files, implementation steps, validation steps, risks, and confidence score.
 - Plan mode remains read-only.
 
-The CLI does not edit files yet. Patch application comes next in Milestone 4.
+Milestone 4A is in place:
+
+- Unified-diff patch tool for text files.
+- Safety checks for path traversal, ignored files, non-text files, and context mismatches.
+- Tests for updating existing files, creating new files, and refusing unsafe patches.
+
+Milestone 4B is in place:
+
+- `code` asks the model for a unified diff.
+- Model responses can include plain diffs or fenced diff blocks.
+- `code` applies the patch and reports changed files.
+- Patch failures are reported without committing anything.
+
+The CLI does not run validation after edits yet. Validation loop comes next.
 
 ## Design Principles
 

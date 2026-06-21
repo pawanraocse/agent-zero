@@ -4,7 +4,9 @@ import typer
 
 from agent_zero.config import ConfigError, load_config
 from agent_zero.context import build_repository_context
+from agent_zero.diff_parser import DiffExtractionError, extract_unified_diff
 from agent_zero.model_client import ModelClientError, create_model_client
+from agent_zero.tools.patch_tool import PatchApplyError, apply_unified_diff
 
 app = typer.Typer(
     help="Agent Zero: a minimal coding agent built from scratch.",
@@ -29,6 +31,12 @@ Return the plan with these sections:
 4. Validation Steps
 5. Risks And Unknowns
 6. Confidence Score"""
+
+CODE_SYSTEM_PROMPT = """You are Agent Zero in code mode.
+Use the provided repository context to make one focused change.
+Return a unified diff only. Do not wrap the diff in prose unless needed.
+Do not modify ignored files, secrets, virtual environments, caches, or binary files.
+Prefer small patches. If the request is unsafe or impossible from the context, explain why without a diff."""
 
 
 def _load_config_or_exit(env_file: Path | None):
@@ -125,4 +133,30 @@ def code(
     ),
 ) -> None:
     """Apply a focused code change and validate it."""
-    _run_stub("code", task, env_file)
+    user_prompt = _build_user_prompt("Change request", task)
+    response = _complete_or_exit(CODE_SYSTEM_PROMPT, user_prompt, env_file)
+
+    try:
+        diff_text = extract_unified_diff(response.content)
+        patch_result = apply_unified_diff(Path.cwd(), diff_text)
+    except DiffExtractionError as exc:
+        typer.secho(f"Could not find a patch: {exc}", fg=typer.colors.RED, err=True)
+        typer.echo(response.content)
+        raise typer.Exit(code=1) from exc
+    except PatchApplyError as exc:
+        typer.secho(f"Patch failed: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
+
+    typer.echo("Applied patch.")
+    typer.echo("Changed files:")
+    for changed_file in patch_result.changed_files:
+        typer.echo(f"- {changed_file}")
+
+    if response.total_tokens is not None:
+        typer.echo("")
+        typer.echo(
+            "Tokens: "
+            f"input={response.input_tokens}, "
+            f"output={response.output_tokens}, "
+            f"total={response.total_tokens}"
+        )

@@ -169,3 +169,119 @@ def test_plan_command_reports_missing_config(tmp_path):
 
     assert result.exit_code == 2
     assert "Missing required configuration" in result.output
+
+
+def test_code_command_applies_model_diff(tmp_path, monkeypatch):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "AGENT_ZERO_BASE_URL=http://localhost:1234/v1",
+                "AGENT_ZERO_API_KEY=test-key",
+                "AGENT_ZERO_MODEL=test-model",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    target = tmp_path / "hello.txt"
+    target.write_text("old\n", encoding="utf-8")
+
+    fake_client = FakeModelClient(
+        ModelResponse(
+            content="""```diff
+diff --git a/hello.txt b/hello.txt
+--- a/hello.txt
++++ b/hello.txt
+@@ -1 +1 @@
+-old
++new
+```""",
+            input_tokens=30,
+            output_tokens=20,
+            total_tokens=50,
+        )
+    )
+    monkeypatch.setattr(cli, "create_model_client", lambda config: fake_client)
+    monkeypatch.chdir(tmp_path)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        ["code", "Change old to new", "--env-file", str(env_file)],
+    )
+
+    assert result.exit_code == 0
+    assert "Applied patch." in result.output
+    assert "- hello.txt" in result.output
+    assert "Tokens: input=30, output=20, total=50" in result.output
+    assert target.read_text(encoding="utf-8") == "new\n"
+    system_prompt, user_prompt = fake_client.calls[0]
+    assert system_prompt == cli.CODE_SYSTEM_PROMPT
+    assert "Change request:\nChange old to new" in user_prompt
+
+
+def test_code_command_reports_missing_diff(tmp_path, monkeypatch):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "AGENT_ZERO_BASE_URL=http://localhost:1234/v1",
+                "AGENT_ZERO_API_KEY=test-key",
+                "AGENT_ZERO_MODEL=test-model",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    fake_client = FakeModelClient(ModelResponse(content="No changes needed."))
+    monkeypatch.setattr(cli, "create_model_client", lambda config: fake_client)
+    monkeypatch.chdir(tmp_path)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        ["code", "Change something", "--env-file", str(env_file)],
+    )
+
+    assert result.exit_code == 1
+    assert "Could not find a patch" in result.output
+    assert "No changes needed." in result.output
+
+
+def test_code_command_reports_patch_failure(tmp_path, monkeypatch):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "AGENT_ZERO_BASE_URL=http://localhost:1234/v1",
+                "AGENT_ZERO_API_KEY=test-key",
+                "AGENT_ZERO_MODEL=test-model",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "hello.txt").write_text("actual\n", encoding="utf-8")
+
+    fake_client = FakeModelClient(
+        ModelResponse(
+            content="""diff --git a/hello.txt b/hello.txt
+--- a/hello.txt
++++ b/hello.txt
+@@ -1 +1 @@
+-expected
++new
+"""
+        )
+    )
+    monkeypatch.setattr(cli, "create_model_client", lambda config: fake_client)
+    monkeypatch.chdir(tmp_path)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        ["code", "Change expected to new", "--env-file", str(env_file)],
+    )
+
+    assert result.exit_code == 1
+    assert "Patch failed:" in result.output
+    assert "context mismatch" in result.output

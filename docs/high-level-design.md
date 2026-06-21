@@ -343,10 +343,10 @@ Goal: let the agent make focused edits.
 
 Steps:
 
-1. Add an `apply_patch` tool.
-2. Ask the model for small diffs.
-3. Apply patches and report changed files.
-4. Add tests for patch success and failure.
+1. Add an `apply_patch` tool. Done for local patch application.
+2. Ask the model for small diffs. Done in `code` mode.
+3. Apply patches and report changed files. Done in `code` mode.
+4. Add tests for patch success and failure. Done.
 
 Learning outcome:
 
