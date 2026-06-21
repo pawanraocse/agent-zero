@@ -443,6 +443,40 @@ Learning outcome:
 - Understand how external memory can make an agent better at finding relevant
   files without changing the model itself.
 
+### Milestone 11: Learning Signals Memory
+
+Goal: use compact feedback records to improve future retrieval.
+
+Steps:
+
+1. Append compact records to `.agent-zero/memory.jsonl`. Done.
+2. Record selected files, useful files, status, success, usage, and validation
+   signals. Done.
+3. Keep recent records only to avoid unbounded memory growth. Done.
+4. Boost files from similar successful past tasks during context selection. Done.
+5. Avoid treating every read-only selected file as useful. Done.
+6. Prefer implementation files over tests for non-test questions. Done.
+
+Learning outcome:
+
+- Understand the difference between answer caching and self-improving retrieval
+  memory.
+
+### Milestone 12: Context Debug Output
+
+Goal: expose retrieval decisions at the CLI.
+
+Steps:
+
+1. Add `--show-context` to `ask`. Done.
+2. Add `--show-context` to `plan`. Done.
+3. Print query terms, index usage, memory usage, selected files, and reasons.
+   Done.
+
+Learning outcome:
+
+- Understand how to debug whether index and learning memory affect retrieval.
+
 ## Suggested Implementation Order
 
 Build in this order:
@@ -462,6 +496,8 @@ Build in this order:
 13. Dry run.
 14. Patch summaries.
 15. Narrative repo index.
+16. Learning signals memory.
+17. Context debug output.
 
 Each step should leave the project runnable.
 

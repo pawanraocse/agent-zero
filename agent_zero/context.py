@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from pathlib import Path
 
+from agent_zero.memory import load_memory, memory_file_scores
 from agent_zero.repo_index import (
     index_entries_by_path,
     index_relationships,
@@ -46,6 +47,10 @@ class ContextDecision:
     selected_files: list[str]
     reasons: dict[str, list[str]]
     index_used: bool = False
+    memory_used: bool = False
+
+    def to_text(self) -> str:
+        return _format_context_decision(self)
 
 
 @dataclass(frozen=True)
@@ -95,12 +100,14 @@ def build_repository_context(
     files = list_files(root, max_files=max_files)
     search_results = search_text(root, task)
     repo_index = load_repo_index(root)
+    memory_records = load_memory(root)
     decision = decide_context_files(
         files=files,
         task=task,
         search_results=search_results,
         max_snippets=max_snippets,
         repo_index=repo_index,
+        memory_records=memory_records,
     )
     snippets = []
 
@@ -125,10 +132,12 @@ def decide_context_files(
     search_results: list[str],
     max_snippets: int,
     repo_index: dict | None = None,
+    memory_records: list[dict] | None = None,
 ) -> ContextDecision:
     terms = _query_terms(task)
     search_paths = _paths_from_search_results(search_results)
     index_entries = index_entries_by_path(repo_index)
+    memory_scores = memory_file_scores(memory_records or [], terms)
     scores: dict[str, int] = {}
     reasons: dict[str, list[str]] = {}
 
@@ -145,7 +154,9 @@ def decide_context_files(
             scores[path] = score
             reasons[path] = path_reasons
 
+    _apply_memory_boosts(scores, reasons, memory_scores, files)
     _apply_index_relationship_boosts(scores, reasons, index_relationships(repo_index))
+    _apply_source_type_balance(scores, reasons, terms)
 
     if not scores or _looks_like_overview_question(task, terms):
         for path, score in OVERVIEW_PRIORS.items():
@@ -154,13 +165,14 @@ def decide_context_files(
                 reasons.setdefault(path, []).append("overview prior")
 
     ranked_paths = sorted(scores, key=lambda path: (scores[path], path), reverse=True)
-    selected_files = ranked_paths[:max_snippets]
+    selected_files = _select_ranked_files(ranked_paths, terms, max_snippets)
 
     return ContextDecision(
         query_terms=terms,
         selected_files=selected_files,
         reasons={path: reasons[path] for path in selected_files},
         index_used=bool(repo_index),
+        memory_used=bool(memory_records),
     )
 
 
@@ -264,6 +276,67 @@ def _apply_index_relationship_boosts(
             )
 
 
+def _apply_memory_boosts(
+    scores: dict[str, int],
+    reasons: dict[str, list[str]],
+    memory_scores: dict[str, int],
+    files: list[str],
+) -> None:
+    file_set = set(files)
+    for path, boost in memory_scores.items():
+        if path not in file_set or not _is_likely_text_context(path):
+            continue
+        scores[path] = scores.get(path, 0) + boost
+        reasons.setdefault(path, []).append(
+            f"memory boost from similar successful task +{boost}"
+        )
+
+
+def _apply_source_type_balance(
+    scores: dict[str, int],
+    reasons: dict[str, list[str]],
+    terms: list[str],
+) -> None:
+    if _wants_tests_or_validation(terms):
+        return
+
+    for path in list(scores):
+        if path.startswith("agent_zero/"):
+            scores[path] += 4
+            reasons.setdefault(path, []).append("implementation file boost")
+        elif path.startswith("tests/"):
+            scores[path] -= 6
+            reasons.setdefault(path, []).append("test file penalty for non-test task")
+            if scores[path] <= 0:
+                del scores[path]
+                reasons.pop(path, None)
+
+
+def _wants_tests_or_validation(terms: list[str]) -> bool:
+    return bool(
+        {"test", "tests", "testing", "pytest", "validation", "validate", "eval"}
+        & set(terms)
+    )
+
+
+def _select_ranked_files(
+    ranked_paths: list[str],
+    terms: list[str],
+    max_snippets: int,
+) -> list[str]:
+    if _wants_tests_or_validation(terms):
+        return ranked_paths[:max_snippets]
+
+    non_test_paths = [path for path in ranked_paths if not path.startswith("tests/")]
+    test_paths = [path for path in ranked_paths if path.startswith("tests/")]
+    selected = non_test_paths[:max_snippets]
+
+    if len(selected) < max_snippets and test_paths:
+        selected.extend(test_paths[: max_snippets - len(selected)])
+
+    return selected
+
+
 def _file_priority(path: str) -> int:
     if path.startswith("agent_zero/"):
         return 4
@@ -311,6 +384,7 @@ def _format_context_decision(decision: ContextDecision) -> str:
     lines = [
         f"Query terms: {', '.join(decision.query_terms) or '(none)'}",
         f"Repo index: {'used' if decision.index_used else 'not found'}",
+        f"Learning memory: {'used' if decision.memory_used else 'not found'}",
     ]
     for path in decision.selected_files:
         reason_text = "; ".join(decision.reasons.get(path, [])) or "selected"

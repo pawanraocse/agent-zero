@@ -1,4 +1,5 @@
 from pathlib import Path
+import os
 
 import typer
 
@@ -15,6 +16,7 @@ from agent_zero.diff_summary import (
     summarize_unified_diff,
 )
 from agent_zero.evals import EvalSpec, EvalSpecError, load_eval_spec, write_eval_result
+from agent_zero.memory import append_memory_record, task_terms
 from agent_zero.model_client import ModelClientError, create_model_client
 from agent_zero.repo_index import (
     build_repo_index,
@@ -87,10 +89,27 @@ def _run_stub(mode: str, task: str, env_file: Path | None) -> None:
 
 def _build_user_prompt(task_label: str, task: str) -> str:
     repository_context = build_repository_context(Path.cwd(), task)
+    return _prompt_from_context(task_label, task, repository_context)
+
+
+def _build_user_prompt_with_context(task_label: str, task: str):
+    repository_context = build_repository_context(Path.cwd(), task)
+    return _prompt_from_context(
+        task_label, task, repository_context
+    ), repository_context
+
+
+def _prompt_from_context(task_label: str, task: str, repository_context) -> str:
     return (
         f"{task_label}:\n{task}\n\n"
         f"Repository context:\n{repository_context.to_prompt()}"
     )
+
+
+def _print_context_selection(repository_context) -> None:
+    typer.echo("Context selection:")
+    typer.echo(repository_context.decision.to_text())
+    typer.echo("")
 
 
 def _print_model_response(
@@ -133,6 +152,41 @@ def _usage_summary(response, config, system_prompt: str, user_prompt: str):
     }
 
 
+def _record_memory(
+    mode: str,
+    task: str,
+    selected_files: list[str],
+    status: str,
+    success: bool,
+    usage: dict | None = None,
+    useful_files: list[str] | None = None,
+    changed_files: list[str] | None = None,
+    patch_summary: list[dict] | None = None,
+    validation_passed: bool | None = None,
+) -> None:
+    if os.environ.get("AGENT_ZERO_DISABLE_MEMORY"):
+        return
+
+    record = {
+        "mode": mode,
+        "task_terms": task_terms(task),
+        "selected_files": selected_files,
+        "useful_files": useful_files or [],
+        "status": status,
+        "success": success,
+    }
+    if usage is not None:
+        record["usage"] = usage
+    if changed_files is not None:
+        record["changed_files"] = changed_files
+    if patch_summary is not None:
+        record["patch_summary"] = patch_summary
+    if validation_passed is not None:
+        record["validation_passed"] = validation_passed
+
+    append_memory_record(Path.cwd(), record)
+
+
 def _complete_or_exit(
     system_prompt: str,
     user_prompt: str,
@@ -164,11 +218,28 @@ def ask(
         "--env-file",
         help="Optional path to a .env file.",
     ),
+    show_context: bool = typer.Option(
+        False,
+        "--show-context",
+        help="Print context selection reasons before the model answer.",
+    ),
 ) -> None:
     """Answer a repo-aware question without editing files."""
-    user_prompt = _build_user_prompt("User question", task)
+    user_prompt, repository_context = _build_user_prompt_with_context(
+        "User question", task
+    )
+    if show_context:
+        _print_context_selection(repository_context)
     response, config = _complete_or_exit(ASK_SYSTEM_PROMPT, user_prompt, env_file)
     _print_model_response(response, config, ASK_SYSTEM_PROMPT, user_prompt)
+    _record_memory(
+        mode="ask",
+        task=task,
+        selected_files=repository_context.decision.selected_files,
+        status="ask_completed",
+        success=True,
+        usage=_usage_summary(response, config, ASK_SYSTEM_PROMPT, user_prompt),
+    )
 
 
 @app.command()
@@ -179,11 +250,28 @@ def plan(
         "--env-file",
         help="Optional path to a .env file.",
     ),
+    show_context: bool = typer.Option(
+        False,
+        "--show-context",
+        help="Print context selection reasons before the model plan.",
+    ),
 ) -> None:
     """Inspect and produce an implementation plan."""
-    user_prompt = _build_user_prompt("Change request", task)
+    user_prompt, repository_context = _build_user_prompt_with_context(
+        "Change request", task
+    )
+    if show_context:
+        _print_context_selection(repository_context)
     response, config = _complete_or_exit(PLAN_SYSTEM_PROMPT, user_prompt, env_file)
     _print_model_response(response, config, PLAN_SYSTEM_PROMPT, user_prompt)
+    _record_memory(
+        mode="plan",
+        task=task,
+        selected_files=repository_context.decision.selected_files,
+        status="plan_completed",
+        success=True,
+        usage=_usage_summary(response, config, PLAN_SYSTEM_PROMPT, user_prompt),
+    )
 
 
 @app.command("index")
@@ -220,8 +308,11 @@ def code(
 ) -> None:
     """Apply a focused code change and validate it."""
     config = _load_config_or_exit(env_file)
-    user_prompt = _build_user_prompt("Change request", task)
+    user_prompt, repository_context = _build_user_prompt_with_context(
+        "Change request", task
+    )
     response = _complete_with_config(CODE_SYSTEM_PROMPT, user_prompt, config)
+    usage = _usage_summary(response, config, CODE_SYSTEM_PROMPT, user_prompt)
 
     try:
         diff_text = extract_unified_diff(response.content)
@@ -230,12 +321,29 @@ def code(
             typer.echo("No changes applied.")
             typer.echo(response.content)
             _print_usage(response, config, CODE_SYSTEM_PROMPT, user_prompt)
+            _record_memory(
+                mode="code",
+                task=task,
+                selected_files=repository_context.decision.selected_files,
+                status="no_changes",
+                success=True,
+                usage=usage,
+            )
             return
         typer.secho(f"Could not find a patch: {exc}", fg=typer.colors.RED, err=True)
         typer.echo(response.content)
+        _record_memory(
+            mode="code",
+            task=task,
+            selected_files=repository_context.decision.selected_files,
+            status="diff_not_found",
+            success=False,
+            usage=usage,
+        )
         raise typer.Exit(code=1) from exc
 
     diff_summary = summarize_unified_diff(diff_text)
+    patch_summary = diff_summary_to_dicts(diff_summary)
     if dry_run:
         typer.echo("Dry run: no files changed.")
         _print_patch_summary(diff_summary)
@@ -243,12 +351,30 @@ def code(
         typer.echo("Proposed patch:")
         typer.echo(diff_text)
         _print_usage(response, config, CODE_SYSTEM_PROMPT, user_prompt)
+        _record_memory(
+            mode="code",
+            task=task,
+            selected_files=repository_context.decision.selected_files,
+            status="dry_run",
+            success=True,
+            usage=usage,
+            patch_summary=patch_summary,
+        )
         return
 
     try:
         patch_result = apply_unified_diff(Path.cwd(), diff_text)
     except PatchApplyError as exc:
         typer.secho(f"Patch failed: {exc}", fg=typer.colors.RED, err=True)
+        _record_memory(
+            mode="code",
+            task=task,
+            selected_files=repository_context.decision.selected_files,
+            status="patch_failed",
+            success=False,
+            usage=usage,
+            patch_summary=patch_summary,
+        )
         raise typer.Exit(code=1) from exc
 
     typer.echo("Applied patch.")
@@ -267,6 +393,22 @@ def code(
         )
 
     _print_usage(response, config, CODE_SYSTEM_PROMPT, user_prompt)
+    _record_memory(
+        mode="code",
+        task=task,
+        selected_files=repository_context.decision.selected_files,
+        status=(
+            "validation_passed"
+            if validation_result is not None and validation_result.passed
+            else "completed"
+        ),
+        success=True,
+        usage=usage,
+        useful_files=patch_result.changed_files,
+        changed_files=patch_result.changed_files,
+        patch_summary=patch_summary,
+        validation_passed=validation_result.passed if validation_result else None,
+    )
 
 
 @app.command("eval")
@@ -299,6 +441,20 @@ def eval_command(
 
     result = _run_eval(spec, config)
     result_path = write_eval_result(result, output_dir)
+    _record_memory(
+        mode=f"eval:{spec.mode}",
+        task=spec.task,
+        selected_files=result.get("selected_files", []),
+        status=result["status"],
+        success=result["success"],
+        usage=result["model_calls"][0]["usage"] if result["model_calls"] else None,
+        useful_files=result.get("changed_files", []),
+        changed_files=result.get("changed_files", []),
+        patch_summary=result.get("patch_summary", []),
+        validation_passed=(
+            result["validation"]["passed"] if result.get("validation") else None
+        ),
+    )
 
     typer.echo(f"Eval: {spec.name}")
     typer.echo(f"Mode: {spec.mode}")
@@ -312,7 +468,10 @@ def eval_command(
 
 def _run_eval(spec: EvalSpec, config) -> dict:
     mode_details = _mode_details(spec.mode)
-    user_prompt = _build_user_prompt(mode_details["task_label"], spec.task)
+    user_prompt, repository_context = _build_user_prompt_with_context(
+        mode_details["task_label"], spec.task
+    )
+    selected_files = repository_context.decision.selected_files
     model_calls = []
 
     try:
@@ -324,6 +483,7 @@ def _run_eval(spec: EvalSpec, config) -> dict:
             success=False,
             status="model_failed",
             response=str(exc),
+            selected_files=selected_files,
             model_calls=[],
         )
 
@@ -344,6 +504,7 @@ def _run_eval(spec: EvalSpec, config) -> dict:
             success=True,
             status=f"{spec.mode}_completed",
             response=response.content,
+            selected_files=selected_files,
             model_calls=model_calls,
         )
 
@@ -352,6 +513,7 @@ def _run_eval(spec: EvalSpec, config) -> dict:
         config=config,
         initial_response=response,
         initial_user_prompt=user_prompt,
+        selected_files=selected_files,
         model_calls=model_calls,
     )
 
@@ -361,6 +523,7 @@ def _run_code_eval(
     config,
     initial_response,
     initial_user_prompt: str,
+    selected_files: list[str],
     model_calls: list[dict],
 ) -> dict:
     changed_files: list[str] = []
@@ -379,6 +542,7 @@ def _run_code_eval(
                 success=True,
                 status="no_changes",
                 response=initial_response.content,
+                selected_files=selected_files,
                 changed_files=changed_files,
                 model_calls=model_calls,
             )
@@ -388,6 +552,7 @@ def _run_code_eval(
             success=False,
             status="diff_not_found",
             response=initial_response.content,
+            selected_files=selected_files,
             changed_files=changed_files,
             model_calls=model_calls,
         )
@@ -398,6 +563,7 @@ def _run_code_eval(
             success=False,
             status="patch_failed",
             response=initial_response.content,
+            selected_files=selected_files,
             changed_files=changed_files,
             patch_summary=diff_summary,
             model_calls=model_calls,
@@ -412,6 +578,7 @@ def _run_code_eval(
             success=True,
             status="validation_passed",
             response=initial_response.content,
+            selected_files=selected_files,
             changed_files=changed_files,
             patch_summary=diff_summary,
             validation=validation_result,
@@ -432,6 +599,7 @@ def _run_code_eval(
         success=retry_result["success"],
         status=retry_result["status"],
         response=initial_response.content,
+        selected_files=selected_files,
         changed_files=changed_files + retry_result["changed_files"],
         patch_summary=diff_summary,
         validation=retry_result["validation"],
@@ -550,6 +718,7 @@ def _base_eval_result(
     status: str,
     response: str,
     model_calls: list[dict],
+    selected_files: list[str] | None = None,
     changed_files: list[str] | None = None,
     patch_summary: list | None = None,
     validation: CommandResult | None = None,
@@ -564,6 +733,7 @@ def _base_eval_result(
         "model": config.model,
         "success": success,
         "status": status,
+        "selected_files": selected_files or [],
         "changed_files": changed_files or [],
         "patch_summary": diff_summary_to_dicts(patch_summary or []),
         "validation": _validation_summary(validation),

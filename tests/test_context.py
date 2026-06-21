@@ -117,3 +117,125 @@ def test_decide_context_files_uses_repo_index_concepts():
         "index related via imports: agent_zero/model_client.py"
         in decision.reasons["agent_zero/config.py"]
     )
+
+
+def test_decide_context_files_uses_learning_memory():
+    files = [
+        "README.md",
+        "agent_zero/model_client.py",
+    ]
+    memory_records = [
+        {
+            "task_terms": ["bedrock", "gateway"],
+            "useful_files": ["agent_zero/model_client.py"],
+            "success": True,
+        }
+    ]
+
+    decision = decide_context_files(
+        files=files,
+        task="Explain bedrock gateway",
+        search_results=[],
+        max_snippets=2,
+        memory_records=memory_records,
+    )
+
+    assert decision.memory_used is True
+    assert decision.selected_files == ["agent_zero/model_client.py"]
+    assert (
+        "memory boost from similar successful task +4"
+        in decision.reasons["agent_zero/model_client.py"]
+    )
+
+
+def test_decide_context_files_penalizes_tests_for_non_test_tasks():
+    files = [
+        "agent_zero/model_client.py",
+        "tests/test_model_client.py",
+    ]
+    repo_index = {
+        "files": [
+            {
+                "path": "agent_zero/model_client.py",
+                "summary": "Handles bedrock gateway calls.",
+                "concepts": ["bedrock", "gateway"],
+                "symbols": ["BedrockGatewayClient"],
+            },
+            {
+                "path": "tests/test_model_client.py",
+                "summary": "Tests bedrock gateway calls.",
+                "concepts": ["bedrock", "gateway"],
+                "symbols": ["test_bedrock_gateway"],
+            },
+        ],
+        "relationships": [],
+    }
+
+    decision = decide_context_files(
+        files=files,
+        task="Explain bedrock gateway",
+        search_results=[
+            "agent_zero/model_client.py:1: BedrockGatewayClient",
+            "tests/test_model_client.py:1: BedrockGatewayClient",
+        ],
+        max_snippets=2,
+        repo_index=repo_index,
+    )
+
+    assert decision.selected_files[0] == "agent_zero/model_client.py"
+    assert "implementation file boost" in decision.reasons["agent_zero/model_client.py"]
+    assert (
+        "test file penalty for non-test task"
+        in decision.reasons["tests/test_model_client.py"]
+    )
+
+
+def test_decide_context_files_selects_non_tests_before_tests_for_explanations():
+    files = [
+        ".env.example",
+        "README.md",
+        "agent_zero/model_client.py",
+        "tests/test_config.py",
+        "tests/test_context.py",
+        "tests/test_model_client.py",
+    ]
+    repo_index = {
+        "files": [
+            {
+                "path": "tests/test_model_client.py",
+                "summary": "Tests bedrock gateway behavior.",
+                "concepts": ["bedrock", "gateway"],
+                "symbols": ["test_bedrock_gateway"],
+            },
+            {
+                "path": "agent_zero/model_client.py",
+                "summary": "Implements bedrock gateway behavior.",
+                "concepts": ["bedrock", "gateway"],
+                "symbols": ["BedrockGatewayClient"],
+            },
+        ],
+        "relationships": [],
+    }
+    search_results = [
+        "tests/test_model_client.py:1: bedrock gateway",
+        "tests/test_context.py:1: bedrock",
+        "tests/test_config.py:1: bedrock",
+        "agent_zero/model_client.py:1: bedrock gateway",
+        "README.md:1: bedrock gateway",
+        ".env.example:1: AGENT_ZERO_PROVIDER=bedrock",
+    ]
+
+    decision = decide_context_files(
+        files=files,
+        task="Explain bedrock gateway",
+        search_results=search_results,
+        max_snippets=4,
+        repo_index=repo_index,
+    )
+
+    assert decision.selected_files == [
+        "agent_zero/model_client.py",
+        "README.md",
+        ".env.example",
+        "tests/test_model_client.py",
+    ]

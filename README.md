@@ -316,6 +316,30 @@ which files are worth reading first.
 
 The index is ignored by git because it is generated local memory.
 
+Agent Zero also writes compact learning signals to:
+
+```text
+.agent-zero/memory.jsonl
+```
+
+This is not an answer cache. It does not store full prompts, full replies, or
+file contents. It stores small signals such as:
+
+- task terms
+- selected files
+- changed files
+- status and success
+- validation result
+- token and cost usage
+
+Future context selection uses similar successful past tasks to boost files that
+were useful before.
+
+For read-only `ask` and `plan` runs, Agent Zero records selected files for
+debugging but does not automatically mark them as useful. Strong usefulness
+signals come from changed files and successful validation in `code` and `eval`
+runs.
+
 ### Ask Mode
 
 Use `ask` for repo-aware questions without editing files.
@@ -330,10 +354,12 @@ What happens internally:
 2. Agent Zero builds the `ask` system prompt.
 3. It scans the repository.
 4. It uses `.agent-zero/index.json` if available.
-5. It ranks files based on the user question, index concepts, and relationships.
-6. It sends selected context to the model.
-7. It prints the answer.
-8. It prints token and cost information when available.
+5. It uses `.agent-zero/memory.jsonl` if available.
+6. It ranks files based on the user question, index concepts, graph
+   relationships, and learning memory.
+7. It sends selected context to the model.
+8. It prints the answer.
+9. It prints token and cost information when available.
 
 Use it for questions like:
 
@@ -342,6 +368,25 @@ python -m agent_zero ask "How does context selection work?"
 python -m agent_zero ask "Where is the Bedrock gateway implemented?"
 python -m agent_zero ask "What safety checks exist before editing files?"
 ```
+
+Use `--show-context` to see why files were selected before the model is called:
+
+```bash
+python -m agent_zero ask "Explain Bedrock gateway" --show-context
+```
+
+Example context debug output:
+
+```text
+Context selection:
+Query terms: explain, bedrock, gateway
+Repo index: used
+Learning memory: used
+- agent_zero/model_client.py: content search hit; index concept matches: bedrock, gateway; memory boost from similar successful task +4
+```
+
+This is useful for checking whether the repo index or learning memory actually
+influenced retrieval.
 
 ### Plan Mode
 
@@ -361,6 +406,12 @@ What happens internally:
 
 This mode is useful when you want to understand the blast radius before writing
 code.
+
+`plan` also supports `--show-context` for the same retrieval debugging:
+
+```bash
+python -m agent_zero plan "Add timeout handling for Bedrock" --show-context
+```
 
 ### Code Mode
 
@@ -704,6 +755,44 @@ Learning outcome:
 
 - A coding agent can improve retrieval by maintaining external memory about the
   repository, even without changing model weights.
+
+### Milestone 11: Learning Signals Memory
+
+Goal: improve future context selection using compact records of what helped.
+
+Built:
+
+- Generated `.agent-zero/memory.jsonl`.
+- Compact run records for `ask`, `plan`, `code`, and `eval`.
+- Memory cap to keep only recent records.
+- No full prompt, full answer, or file contents stored.
+- Context selection boost from similar successful past tasks.
+- Read-only runs do not automatically promote all selected files as useful.
+- Implementation files are favored over tests unless the task is test or
+  validation related.
+- For non-test questions, tests are treated as supporting context after
+  implementation/docs/config files.
+
+Learning outcome:
+
+- Self-learning agents usually improve through external memory and feedback
+  signals, not by changing model weights during normal runs.
+
+### Milestone 12: Context Debug Output
+
+Goal: make retrieval decisions visible from the terminal.
+
+Built:
+
+- `--show-context` for `ask`.
+- `--show-context` for `plan`.
+- Prints query terms, repo index usage, learning memory usage, selected files,
+  and selection reasons before calling the model.
+
+Learning outcome:
+
+- Retrieval should be inspectable; otherwise it is hard to tell whether index or
+  memory is helping.
 
 ## Design Principles
 
