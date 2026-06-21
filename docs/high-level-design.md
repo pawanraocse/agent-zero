@@ -358,10 +358,10 @@ Goal: run checks after edits.
 
 Steps:
 
-1. Add `run_command`.
-2. Run a configured validation command.
-3. Feed failures back into the agent once.
-4. Summarize final status.
+1. Add `run_command`. Done.
+2. Run a configured validation command. Done.
+3. Feed failures back into the agent once. Done.
+4. Summarize final status. Done.
 
 Learning outcome:
 

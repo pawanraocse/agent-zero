@@ -1,5 +1,7 @@
 # Agent Zero
 
+**Note:** Agent Zero is a learning project built to understand how coding agents work from first principles. It is not a production tool.
+
 Agent Zero is an educational tool for learning about AI-assisted code generation and repository automation.
 
 Agent Zero is a small coding agent built from scratch to understand how agentic coding systems work under the hood.
@@ -228,7 +230,14 @@ Milestone 4B is in place:
 - `code` applies the patch and reports changed files.
 - Patch failures are reported without committing anything.
 
-The CLI does not run validation after edits yet. Validation loop comes next.
+Milestone 5 is in place:
+
+- Optional validation command after `code` applies a patch.
+- Validation output includes command, pass/fail status, stdout, stderr, and timeout handling.
+- Validation is configured with `AGENT_ZERO_VALIDATION_COMMAND`.
+- On validation failure, `code` asks the model for one corrective diff and reruns validation once.
+
+The validation loop is intentionally capped at one retry for now.
 
 ## Design Principles
 

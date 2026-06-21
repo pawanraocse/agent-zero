@@ -2,6 +2,7 @@ from typer.testing import CliRunner
 
 from agent_zero import cli
 from agent_zero.cli import app
+from agent_zero.tools.command_tool import CommandResult
 from agent_zero.model_client import ModelClientError, ModelResponse
 
 
@@ -13,6 +14,16 @@ class FakeModelClient:
     def complete(self, system_prompt: str, user_prompt: str) -> ModelResponse:
         self.calls.append((system_prompt, user_prompt))
         return self.response
+
+
+class SequenceModelClient:
+    def __init__(self, responses: list[ModelResponse]):
+        self.responses = responses
+        self.calls = []
+
+    def complete(self, system_prompt: str, user_prompt: str) -> ModelResponse:
+        self.calls.append((system_prompt, user_prompt))
+        return self.responses.pop(0)
 
 
 def test_ask_command_calls_model_and_prints_response(tmp_path, monkeypatch):
@@ -213,6 +224,7 @@ diff --git a/hello.txt b/hello.txt
     assert result.exit_code == 0
     assert "Applied patch." in result.output
     assert "- hello.txt" in result.output
+    assert "Validation skipped" in result.output
     assert "Tokens: input=30, output=20, total=50" in result.output
     assert target.read_text(encoding="utf-8") == "new\n"
     system_prompt, user_prompt = fake_client.calls[0]
@@ -285,3 +297,181 @@ def test_code_command_reports_patch_failure(tmp_path, monkeypatch):
     assert result.exit_code == 1
     assert "Patch failed:" in result.output
     assert "context mismatch" in result.output
+
+
+def test_code_command_runs_validation_success(tmp_path, monkeypatch):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "AGENT_ZERO_BASE_URL=http://localhost:1234/v1",
+                "AGENT_ZERO_API_KEY=test-key",
+                "AGENT_ZERO_MODEL=test-model",
+                "AGENT_ZERO_VALIDATION_COMMAND=pytest",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "hello.txt").write_text("old\n", encoding="utf-8")
+    fake_client = FakeModelClient(
+        ModelResponse(
+            content="""diff --git a/hello.txt b/hello.txt
+--- a/hello.txt
++++ b/hello.txt
+@@ -1 +1 @@
+-old
++new
+"""
+        )
+    )
+    monkeypatch.setattr(cli, "create_model_client", lambda config: fake_client)
+    monkeypatch.setattr(
+        cli,
+        "run_command",
+        lambda command, cwd, timeout_seconds: CommandResult(
+            command=["pytest"],
+            exit_code=0,
+            stdout="passed\n",
+            stderr="",
+        ),
+    )
+    monkeypatch.chdir(tmp_path)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        ["code", "Change old to new", "--env-file", str(env_file)],
+    )
+
+    assert result.exit_code == 0
+    assert "Validation command: pytest" in result.output
+    assert "Validation passed." in result.output
+
+
+def test_code_command_reports_validation_failure(tmp_path, monkeypatch):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "AGENT_ZERO_BASE_URL=http://localhost:1234/v1",
+                "AGENT_ZERO_API_KEY=test-key",
+                "AGENT_ZERO_MODEL=test-model",
+                "AGENT_ZERO_VALIDATION_COMMAND=pytest",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "hello.txt").write_text("old\n", encoding="utf-8")
+    fake_client = SequenceModelClient(
+        [
+            ModelResponse(
+                content="""diff --git a/hello.txt b/hello.txt
+--- a/hello.txt
++++ b/hello.txt
+@@ -1 +1 @@
+-old
++new
+"""
+            ),
+            ModelResponse(content="No safe correction."),
+        ]
+    )
+    monkeypatch.setattr(cli, "create_model_client", lambda config: fake_client)
+    monkeypatch.setattr(
+        cli,
+        "run_command",
+        lambda command, cwd, timeout_seconds: CommandResult(
+            command=["pytest"],
+            exit_code=1,
+            stdout="failed\n",
+            stderr="trace\n",
+        ),
+    )
+    monkeypatch.chdir(tmp_path)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        ["code", "Change old to new", "--env-file", str(env_file)],
+    )
+
+    assert result.exit_code == 1
+    assert "Validation failed with exit code 1." in result.output
+    assert "Attempting one validation-fix retry." in result.output
+    assert "Could not find a retry patch" in result.output
+    assert "failed" in result.output
+    assert "trace" in result.output
+
+
+def test_code_command_retries_after_validation_failure(tmp_path, monkeypatch):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "AGENT_ZERO_BASE_URL=http://localhost:1234/v1",
+                "AGENT_ZERO_API_KEY=test-key",
+                "AGENT_ZERO_MODEL=test-model",
+                "AGENT_ZERO_VALIDATION_COMMAND=pytest",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "hello.txt").write_text("old\n", encoding="utf-8")
+    fake_client = SequenceModelClient(
+        [
+            ModelResponse(
+                content="""diff --git a/hello.txt b/hello.txt
+--- a/hello.txt
++++ b/hello.txt
+@@ -1 +1 @@
+-old
++bad
+"""
+            ),
+            ModelResponse(
+                content="""diff --git a/hello.txt b/hello.txt
+--- a/hello.txt
++++ b/hello.txt
+@@ -1 +1 @@
+-bad
++good
+"""
+            ),
+        ]
+    )
+    validation_results = [
+        CommandResult(
+            command=["pytest"],
+            exit_code=1,
+            stdout="failed\n",
+            stderr="trace\n",
+        ),
+        CommandResult(
+            command=["pytest"],
+            exit_code=0,
+            stdout="passed\n",
+            stderr="",
+        ),
+    ]
+    monkeypatch.setattr(cli, "create_model_client", lambda config: fake_client)
+    monkeypatch.setattr(
+        cli,
+        "run_command",
+        lambda command, cwd, timeout_seconds: validation_results.pop(0),
+    )
+    monkeypatch.chdir(tmp_path)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        ["code", "Change old to good", "--env-file", str(env_file)],
+    )
+
+    assert result.exit_code == 0
+    assert "Attempting one validation-fix retry." in result.output
+    assert "Applied retry patch." in result.output
+    assert "Validation passed." in result.output
+    assert (tmp_path / "hello.txt").read_text(encoding="utf-8") == "good\n"
+    assert fake_client.calls[0][0] == cli.CODE_SYSTEM_PROMPT
+    assert fake_client.calls[1][0] == cli.FIX_VALIDATION_SYSTEM_PROMPT
+    assert "Stdout:\nfailed" in fake_client.calls[1][1]

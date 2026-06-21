@@ -6,6 +6,7 @@ from agent_zero.config import ConfigError, load_config
 from agent_zero.context import build_repository_context
 from agent_zero.diff_parser import DiffExtractionError, extract_unified_diff
 from agent_zero.model_client import ModelClientError, create_model_client
+from agent_zero.tools.command_tool import CommandRunError, CommandResult, run_command
 from agent_zero.tools.patch_tool import PatchApplyError, apply_unified_diff
 
 app = typer.Typer(
@@ -37,6 +38,12 @@ Use the provided repository context to make one focused change.
 Return a unified diff only. Do not wrap the diff in prose unless needed.
 Do not modify ignored files, secrets, virtual environments, caches, or binary files.
 Prefer small patches. If the request is unsafe or impossible from the context, explain why without a diff."""
+
+FIX_VALIDATION_SYSTEM_PROMPT = """You are Agent Zero fixing a failed validation.
+Use the original change request, changed files, and validation output.
+Return one corrective unified diff only.
+Keep the fix as small as possible.
+If there is no safe correction, explain why without a diff."""
 
 
 def _load_config_or_exit(env_file: Path | None):
@@ -82,8 +89,16 @@ def _print_model_response(response) -> None:
         )
 
 
-def _complete_or_exit(system_prompt: str, user_prompt: str, env_file: Path | None):
+def _complete_or_exit(
+    system_prompt: str,
+    user_prompt: str,
+    env_file: Path | None,
+):
     config = _load_config_or_exit(env_file)
+    return _complete_with_config(system_prompt, user_prompt, config)
+
+
+def _complete_with_config(system_prompt: str, user_prompt: str, config):
     client = create_model_client(config)
 
     try:
@@ -133,8 +148,9 @@ def code(
     ),
 ) -> None:
     """Apply a focused code change and validate it."""
+    config = _load_config_or_exit(env_file)
     user_prompt = _build_user_prompt("Change request", task)
-    response = _complete_or_exit(CODE_SYSTEM_PROMPT, user_prompt, env_file)
+    response = _complete_with_config(CODE_SYSTEM_PROMPT, user_prompt, config)
 
     try:
         diff_text = extract_unified_diff(response.content)
@@ -152,6 +168,15 @@ def code(
     for changed_file in patch_result.changed_files:
         typer.echo(f"- {changed_file}")
 
+    validation_result = _run_validation(config)
+    if not _print_validation_result(validation_result, exit_on_failure=False):
+        _retry_after_validation_failure(
+            task=task,
+            changed_files=patch_result.changed_files,
+            validation_result=validation_result,
+            config=config,
+        )
+
     if response.total_tokens is not None:
         typer.echo("")
         typer.echo(
@@ -160,3 +185,108 @@ def code(
             f"output={response.output_tokens}, "
             f"total={response.total_tokens}"
         )
+
+
+def _run_validation(config) -> CommandResult | None:
+    if not config.validation_command:
+        return None
+
+    try:
+        return run_command(
+            config.validation_command,
+            cwd=Path.cwd(),
+            timeout_seconds=config.validation_timeout_seconds,
+        )
+    except CommandRunError as exc:
+        typer.secho(f"Validation could not start: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
+
+
+def _retry_after_validation_failure(
+    task: str,
+    changed_files: list[str],
+    validation_result: CommandResult | None,
+    config,
+) -> None:
+    if validation_result is None:
+        return
+
+    typer.echo("")
+    typer.echo("Attempting one validation-fix retry.")
+    retry_prompt = _build_validation_retry_prompt(
+        task, changed_files, validation_result
+    )
+    response = _complete_with_config(FIX_VALIDATION_SYSTEM_PROMPT, retry_prompt, config)
+
+    try:
+        diff_text = extract_unified_diff(response.content)
+        patch_result = apply_unified_diff(Path.cwd(), diff_text)
+    except DiffExtractionError as exc:
+        typer.secho(
+            f"Could not find a retry patch: {exc}",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        typer.echo(response.content)
+        raise typer.Exit(code=1) from exc
+    except PatchApplyError as exc:
+        typer.secho(f"Retry patch failed: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
+
+    typer.echo("Applied retry patch.")
+    typer.echo("Changed files:")
+    for changed_file in patch_result.changed_files:
+        typer.echo(f"- {changed_file}")
+
+    retry_validation_result = _run_validation(config)
+    _print_validation_result(retry_validation_result, exit_on_failure=True)
+
+
+def _build_validation_retry_prompt(
+    task: str,
+    changed_files: list[str],
+    validation_result: CommandResult,
+) -> str:
+    return (
+        f"Original change request:\n{task}\n\n"
+        f"Changed files:\n{chr(10).join(f'- {path}' for path in changed_files)}\n\n"
+        f"Validation command:\n{' '.join(validation_result.command)}\n\n"
+        f"Exit code:\n{validation_result.exit_code}\n\n"
+        f"Timed out:\n{validation_result.timed_out}\n\n"
+        f"Stdout:\n{validation_result.stdout}\n\n"
+        f"Stderr:\n{validation_result.stderr}"
+    )
+
+
+def _print_validation_result(
+    result: CommandResult | None,
+    exit_on_failure: bool = True,
+) -> bool:
+    if result is None:
+        typer.echo("")
+        typer.echo("Validation skipped: AGENT_ZERO_VALIDATION_COMMAND is not set.")
+        return True
+
+    typer.echo("")
+    typer.echo(f"Validation command: {' '.join(result.command)}")
+    if result.passed:
+        typer.echo("Validation passed.")
+        return True
+
+    if result.timed_out:
+        typer.echo("Validation timed out.")
+    else:
+        typer.echo(f"Validation failed with exit code {result.exit_code}.")
+
+    if result.stdout:
+        typer.echo("")
+        typer.echo("Validation stdout:")
+        typer.echo(result.stdout)
+    if result.stderr:
+        typer.echo("")
+        typer.echo("Validation stderr:")
+        typer.echo(result.stderr)
+
+    if exit_on_failure:
+        raise typer.Exit(code=1)
+    return False

@@ -2,7 +2,7 @@ import os
 from pathlib import Path
 from typing import Literal
 
-from dotenv import load_dotenv
+from dotenv import dotenv_values
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 
@@ -19,7 +19,7 @@ class AgentConfig(BaseModel):
     )
     base_url: str | None = Field(default=None, alias="AGENT_ZERO_BASE_URL")
     api_key: str | None = Field(default=None, alias="AGENT_ZERO_API_KEY")
-    model: str = Field(alias="AGENT_ZERO_MODEL")
+    model: str | None = Field(default=None, alias="AGENT_ZERO_MODEL")
     bedrock_url: str | None = Field(default=None, alias="AGENT_ZERO_BEDROCK_URL")
     bedrock_auth_header: str | None = Field(
         default=None,
@@ -39,33 +39,45 @@ class AgentConfig(BaseModel):
         default=120.0,
         alias="AGENT_ZERO_BEDROCK_TIMEOUT_SECONDS",
     )
+    validation_command: str | None = Field(
+        default=None,
+        alias="AGENT_ZERO_VALIDATION_COMMAND",
+    )
+    validation_timeout_seconds: float = Field(
+        default=120.0,
+        alias="AGENT_ZERO_VALIDATION_TIMEOUT_SECONDS",
+    )
 
 
 def load_config(env_file: Path | None = None) -> AgentConfig:
     """Load Agent Zero config from a .env file and environment variables."""
-    if env_file is None:
-        load_dotenv()
-    else:
-        if not env_file.exists():
-            raise ConfigError(f"Environment file does not exist: {env_file}")
-        load_dotenv(env_file)
+    env_values = _load_env_values(env_file)
 
     raw_config = {
-        "AGENT_ZERO_PROVIDER": os.getenv("AGENT_ZERO_PROVIDER", "openai"),
-        "AGENT_ZERO_BASE_URL": os.getenv("AGENT_ZERO_BASE_URL"),
-        "AGENT_ZERO_API_KEY": os.getenv("AGENT_ZERO_API_KEY"),
-        "AGENT_ZERO_MODEL": os.getenv("AGENT_ZERO_MODEL"),
-        "AGENT_ZERO_BEDROCK_URL": os.getenv("AGENT_ZERO_BEDROCK_URL"),
-        "AGENT_ZERO_BEDROCK_AUTH_HEADER": os.getenv("AGENT_ZERO_BEDROCK_AUTH_HEADER"),
-        "AGENT_ZERO_BEDROCK_TENANT_ID": os.getenv("AGENT_ZERO_BEDROCK_TENANT_ID"),
-        "AGENT_ZERO_MAX_TOKENS": os.getenv("AGENT_ZERO_MAX_TOKENS", "4096"),
-        "AGENT_ZERO_TOP_P": os.getenv("AGENT_ZERO_TOP_P", "0.2"),
-        "AGENT_ZERO_BEDROCK_POLL_INTERVAL_SECONDS": os.getenv(
+        "AGENT_ZERO_PROVIDER": env_values.get("AGENT_ZERO_PROVIDER", "openai"),
+        "AGENT_ZERO_BASE_URL": env_values.get("AGENT_ZERO_BASE_URL"),
+        "AGENT_ZERO_API_KEY": env_values.get("AGENT_ZERO_API_KEY"),
+        "AGENT_ZERO_MODEL": env_values.get("AGENT_ZERO_MODEL"),
+        "AGENT_ZERO_BEDROCK_URL": env_values.get("AGENT_ZERO_BEDROCK_URL"),
+        "AGENT_ZERO_BEDROCK_AUTH_HEADER": env_values.get(
+            "AGENT_ZERO_BEDROCK_AUTH_HEADER"
+        ),
+        "AGENT_ZERO_BEDROCK_TENANT_ID": env_values.get("AGENT_ZERO_BEDROCK_TENANT_ID"),
+        "AGENT_ZERO_MAX_TOKENS": env_values.get("AGENT_ZERO_MAX_TOKENS", "4096"),
+        "AGENT_ZERO_TOP_P": env_values.get("AGENT_ZERO_TOP_P", "0.2"),
+        "AGENT_ZERO_BEDROCK_POLL_INTERVAL_SECONDS": env_values.get(
             "AGENT_ZERO_BEDROCK_POLL_INTERVAL_SECONDS",
             "1.0",
         ),
-        "AGENT_ZERO_BEDROCK_TIMEOUT_SECONDS": os.getenv(
+        "AGENT_ZERO_BEDROCK_TIMEOUT_SECONDS": env_values.get(
             "AGENT_ZERO_BEDROCK_TIMEOUT_SECONDS",
+            "120.0",
+        ),
+        "AGENT_ZERO_VALIDATION_COMMAND": env_values.get(
+            "AGENT_ZERO_VALIDATION_COMMAND"
+        ),
+        "AGENT_ZERO_VALIDATION_TIMEOUT_SECONDS": env_values.get(
+            "AGENT_ZERO_VALIDATION_TIMEOUT_SECONDS",
             "120.0",
         ),
     }
@@ -77,6 +89,19 @@ def load_config(env_file: Path | None = None) -> AgentConfig:
 
     _validate_provider_config(config)
     return config
+
+
+def _load_env_values(env_file: Path | None) -> dict[str, str | None]:
+    if env_file is not None:
+        if not env_file.exists():
+            raise ConfigError(f"Environment file does not exist: {env_file}")
+        return dict(dotenv_values(env_file))
+
+    values = dict(dotenv_values())
+    for key, value in os.environ.items():
+        if key.startswith("AGENT_ZERO_"):
+            values[key] = value
+    return values
 
 
 def _validate_provider_config(config: AgentConfig) -> None:

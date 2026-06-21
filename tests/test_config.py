@@ -8,6 +8,8 @@ def test_load_config_from_env_file(tmp_path, monkeypatch):
     monkeypatch.delenv("AGENT_ZERO_BASE_URL", raising=False)
     monkeypatch.delenv("AGENT_ZERO_API_KEY", raising=False)
     monkeypatch.delenv("AGENT_ZERO_MODEL", raising=False)
+    monkeypatch.delenv("AGENT_ZERO_VALIDATION_COMMAND", raising=False)
+    monkeypatch.delenv("AGENT_ZERO_VALIDATION_TIMEOUT_SECONDS", raising=False)
 
     env_file = tmp_path / ".env"
     env_file.write_text(
@@ -27,6 +29,8 @@ def test_load_config_from_env_file(tmp_path, monkeypatch):
     assert config.api_key == "test-key"
     assert config.model == "test-model"
     assert config.provider == "openai"
+    assert config.validation_command is None
+    assert config.validation_timeout_seconds == 120
 
 
 def test_load_bedrock_config_from_env_file(tmp_path, monkeypatch):
@@ -37,6 +41,8 @@ def test_load_bedrock_config_from_env_file(tmp_path, monkeypatch):
     monkeypatch.delenv("AGENT_ZERO_BEDROCK_URL", raising=False)
     monkeypatch.delenv("AGENT_ZERO_BEDROCK_AUTH_HEADER", raising=False)
     monkeypatch.delenv("AGENT_ZERO_BEDROCK_TENANT_ID", raising=False)
+    monkeypatch.delenv("AGENT_ZERO_VALIDATION_COMMAND", raising=False)
+    monkeypatch.delenv("AGENT_ZERO_VALIDATION_TIMEOUT_SECONDS", raising=False)
 
     env_file = tmp_path / ".env"
     env_file.write_text(
@@ -51,6 +57,8 @@ def test_load_bedrock_config_from_env_file(tmp_path, monkeypatch):
                 "AGENT_ZERO_TOP_P=0.4",
                 "AGENT_ZERO_BEDROCK_POLL_INTERVAL_SECONDS=0.5",
                 "AGENT_ZERO_BEDROCK_TIMEOUT_SECONDS=30",
+                "AGENT_ZERO_VALIDATION_COMMAND=pytest",
+                "AGENT_ZERO_VALIDATION_TIMEOUT_SECONDS=45",
             ]
         ),
         encoding="utf-8",
@@ -67,6 +75,8 @@ def test_load_bedrock_config_from_env_file(tmp_path, monkeypatch):
     assert config.top_p == 0.4
     assert config.bedrock_poll_interval_seconds == 0.5
     assert config.bedrock_timeout_seconds == 30
+    assert config.validation_command == "pytest"
+    assert config.validation_timeout_seconds == 45
 
 
 def test_load_config_reports_missing_values(tmp_path, monkeypatch):
@@ -74,6 +84,8 @@ def test_load_config_reports_missing_values(tmp_path, monkeypatch):
     monkeypatch.delenv("AGENT_ZERO_BASE_URL", raising=False)
     monkeypatch.delenv("AGENT_ZERO_API_KEY", raising=False)
     monkeypatch.delenv("AGENT_ZERO_MODEL", raising=False)
+    monkeypatch.delenv("AGENT_ZERO_VALIDATION_COMMAND", raising=False)
+    monkeypatch.delenv("AGENT_ZERO_VALIDATION_TIMEOUT_SECONDS", raising=False)
 
     env_file = tmp_path / ".env"
     env_file.write_text("AGENT_ZERO_MODEL=test-model\n", encoding="utf-8")
@@ -88,6 +100,8 @@ def test_load_config_reports_invalid_bedrock_header(tmp_path, monkeypatch):
     monkeypatch.delenv("AGENT_ZERO_BEDROCK_URL", raising=False)
     monkeypatch.delenv("AGENT_ZERO_BEDROCK_AUTH_HEADER", raising=False)
     monkeypatch.delenv("AGENT_ZERO_BEDROCK_TENANT_ID", raising=False)
+    monkeypatch.delenv("AGENT_ZERO_VALIDATION_COMMAND", raising=False)
+    monkeypatch.delenv("AGENT_ZERO_VALIDATION_TIMEOUT_SECONDS", raising=False)
 
     env_file = tmp_path / ".env"
     env_file.write_text(
