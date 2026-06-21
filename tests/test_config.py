@@ -31,6 +31,8 @@ def test_load_config_from_env_file(tmp_path, monkeypatch):
     assert config.provider == "openai"
     assert config.validation_command is None
     assert config.validation_timeout_seconds == 120
+    assert config.input_cost_per_1m_tokens is None
+    assert config.output_cost_per_1m_tokens is None
 
 
 def test_load_bedrock_config_from_env_file(tmp_path, monkeypatch):
@@ -59,6 +61,8 @@ def test_load_bedrock_config_from_env_file(tmp_path, monkeypatch):
                 "AGENT_ZERO_BEDROCK_TIMEOUT_SECONDS=30",
                 "AGENT_ZERO_VALIDATION_COMMAND=pytest",
                 "AGENT_ZERO_VALIDATION_TIMEOUT_SECONDS=45",
+                "AGENT_ZERO_INPUT_COST_PER_1M_TOKENS=1.5",
+                "AGENT_ZERO_OUTPUT_COST_PER_1M_TOKENS=7.5",
             ]
         ),
         encoding="utf-8",
@@ -77,6 +81,8 @@ def test_load_bedrock_config_from_env_file(tmp_path, monkeypatch):
     assert config.bedrock_timeout_seconds == 30
     assert config.validation_command == "pytest"
     assert config.validation_timeout_seconds == 45
+    assert config.input_cost_per_1m_tokens == 1.5
+    assert config.output_cost_per_1m_tokens == 7.5
 
 
 def test_load_config_reports_missing_values(tmp_path, monkeypatch):

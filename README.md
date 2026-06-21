@@ -1,148 +1,212 @@
 # Agent Zero
 
-**Note:** Agent Zero is a learning project built to understand how coding agents work from first principles. It is not a production tool.
+Build a coding agent from scratch, one visible step at a time.
 
-Agent Zero is an educational tool for learning about AI-assisted code generation and repository automation.
+Agent Zero is a small educational coding agent built to understand how tools
+like Claude Code, Codex, Cursor, and other agentic coding systems work under
+the hood. It is not trying to be the most powerful agent. It is trying to be
+the clearest one.
 
-Agent Zero is a small coding agent built from scratch to understand how agentic coding systems work under the hood.
+The project intentionally keeps the core loop simple:
 
-This is not meant to compete with Claude Code, Codex, Cursor, or other full-featured coding agents. The point is to learn the basic loop by building it directly:
+1. Read the user request.
+2. Inspect the repository.
+3. Select useful context.
+4. Call an AI model.
+5. Ask for an answer, plan, or patch.
+6. Apply the patch when allowed.
+7. Run validation.
+8. Show tokens, estimated cost, and final result.
 
-1. Inspect the codebase.
-2. Decide which context matters.
-3. Call simple tools.
-4. Plan a focused change.
-5. Apply a patch.
-6. Run validation.
-7. Explain what happened.
-
-No MCP support. No plugin system. No hidden framework magic. Just a minimal harness that makes the agent loop visible.
+No MCP. No plugin marketplace. No hidden framework. Just a small harness that
+makes the moving parts of a coding agent visible.
 
 ## Why This Exists
 
-Agent Zero is a pet project for learning how to build a coding agent from first principles.
+I built Agent Zero to learn how coding agents actually work.
 
-The main goals are:
+Using a polished agent is useful, but building one teaches different lessons:
 
-- Understand how coding agents generate useful code instead of just text.
-- Learn how planning, tool calling, context selection, patching, and validation fit together.
-- Keep token usage visible so cost and context tradeoffs are easier to reason about.
-- Support OpenAI-compatible APIs and local model servers.
-- Experiment with open source models on small and medium-sized codebases.
-- Keep the architecture simple enough to explain in a blog series.
+- Why context selection matters more than simply reading every file.
+- Why `ask`, `plan`, and `code` need different permissions.
+- Why patches are safer than asking a model to rewrite whole files.
+- Why validation turns a chatbot into a workflow.
+- Why token usage and model choice directly affect cost and quality.
+- Why small open source or hosted models need a careful harness around them.
 
-## What Makes It Different
+This repository is meant to be read, changed, broken, repaired, and explained.
+It is a learning project first.
 
-Agent Zero is intentionally small and explicit.
+## What You Will Learn
 
-- It analyzes before it writes. The agent should inspect the existing codebase, identify patterns, and understand the likely blast radius before suggesting changes.
-- Planning is a first-class step. `plan` mode should produce an implementation plan, validation plan, testing notes, and a confidence score.
-- It is portable. The same harness should work with hosted OpenAI-compatible APIs or local models such as Qwen through a compatible server.
-- It favors observable behavior. Tool calls, selected context, patches, and validation results should be easy to inspect.
+By following this project, you should understand the building blocks of a
+minimal coding agent:
 
-## Modes
+- CLI design with `typer`.
+- `.env` based configuration.
+- OpenAI-compatible model calls.
+- Internal asynchronous Bedrock gateway calls.
+- Repository context selection.
+- Safe file reading and search.
+- Prompt design for multiple modes.
+- Unified diff extraction.
+- Safe patch application.
+- Validation command execution.
+- One retry after validation failure.
+- Token and cost visibility.
 
-The project is designed around three core modes:
+The point is not magic. The point is to make the magic inspectable.
 
-- `ask`: repo-aware Q&A without editing files.
-- `plan`: analysis, implementation planning, validation planning, and confidence scoring.
-- `code`: focused code changes with patching and validation.
+## Current Capabilities
 
-## Planned Features
+Agent Zero currently supports three modes.
 
-- CLI entry point for running agent tasks.
-- File read and directory inspection tools.
-- Fast text search over the target repository.
-- Patch application for focused edits.
-- Shell command execution for validation.
-- Prompt templates for each mode.
-- Token and cost tracking.
-- Small evaluation tasks to compare model behavior.
+| Mode | Edits files? | Runs validation? | Purpose |
+| --- | --- | --- | --- |
+| `ask` | No | No | Ask repo-aware questions |
+| `plan` | No | No | Generate an implementation and validation plan |
+| `code` | Yes | Yes, if configured | Apply a focused patch and validate it |
 
-## Non-Goals
+Supported providers:
 
-Agent Zero deliberately avoids some features, at least for the first version:
+- OpenAI-compatible APIs.
+- Internal asynchronous Bedrock gateway.
+- Local OpenAI-compatible model servers, if available.
 
-- MCP integration.
-- Plugin marketplaces.
-- Multi-agent orchestration.
-- Remote workspace management.
-- Large IDE-style UI.
-- Complex memory systems.
+Supported tools:
 
-The first version should stay boring, inspectable, and easy to modify.
+- Repository file listing.
+- Safe text file reading.
+- Text search.
+- Query-aware context ranking.
+- Unified diff parsing.
+- Safe patch application.
+- Validation command execution.
+- Token usage and estimated cost reporting.
+- JSON eval runs for repeatable model comparison.
 
-## Suggested Project Structure
+## How The Agent Loop Works
+
+```mermaid
+flowchart TD
+    A["User command"] --> B["CLI parses mode and task"]
+    B --> C["Load .env configuration"]
+    C --> D["Build mode-specific system prompt"]
+    D --> E["Build repository context"]
+    E --> F["Call configured model"]
+    F --> G{"Mode"}
+    G -->|ask| H["Print answer"]
+    G -->|plan| I["Print structured plan"]
+    G -->|code| J["Extract unified diff"]
+    J --> K["Apply patch safely"]
+    K --> L["Run validation command"]
+    L --> M{"Validation passed?"}
+    M -->|yes| N["Print success"]
+    M -->|no| O["Ask model for one fix diff"]
+    O --> P["Apply retry patch"]
+    P --> Q["Run validation again"]
+    H --> R["Print tokens and cost"]
+    I --> R
+    N --> R
+    Q --> R
+```
+
+The important idea is that Agent Zero separates thinking from acting.
+
+`ask` and `plan` can inspect, but they cannot edit. `code` can edit, but only by
+returning a patch that passes local safety checks.
+
+## Project Structure
 
 ```text
 agent-zero/
 |-- agent_zero/
 |   |-- __init__.py
+|   |-- __main__.py
 |   |-- cli.py
-|   |-- agent.py
 |   |-- config.py
-|   |-- prompts.py
-|   |-- model_client.py
 |   |-- context.py
-|   |-- planner.py
-|   |-- tools/
-|   |   |-- __init__.py
-|   |   |-- read_file.py
-|   |   |-- search.py
-|   |   |-- apply_patch.py
-|   |   `-- run_command.py
-|   `-- validation.py
+|   |-- diff_parser.py
+|   |-- model_client.py
+|   |-- usage.py
+|   `-- tools/
+|       |-- command_tool.py
+|       |-- file_tools.py
+|       `-- patch_tool.py
+|-- docs/
+|   `-- high-level-design.md
 |-- tests/
 |-- .env.example
+|-- pyproject.toml
 |-- requirements.txt
 `-- README.md
 ```
 
-## Setup
+Key files:
 
-Create and activate a virtual environment:
+- `agent_zero/cli.py`: command entry point and orchestration.
+- `agent_zero/config.py`: `.env` and environment loading.
+- `agent_zero/model_client.py`: OpenAI-compatible and Bedrock gateway clients.
+- `agent_zero/context.py`: repository context selection.
+- `agent_zero/diff_parser.py`: model response to unified diff extraction.
+- `agent_zero/tools/patch_tool.py`: safe patch application.
+- `agent_zero/tools/command_tool.py`: validation command execution.
+- `agent_zero/usage.py`: token and cost calculation.
+
+## Quick Start
+
+### 1. Clone the repository
+
+```bash
+git clone https://github.com/pawanraocse/agent-zero.git
+cd agent-zero
+```
+
+### 2. Create a virtual environment
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 ```
 
-Install dependencies:
+### 3. Install dependencies
 
 ```bash
 pip install -r requirements.txt
 ```
 
-Create a local environment file:
+### 4. Create your local environment file
 
 ```bash
 cp .env.example .env
 ```
 
-For an OpenAI-compatible API, use values like:
+Do not commit `.env`. It contains local secrets.
+
+## Configure A Model Provider
+
+Agent Zero needs an AI model. The harness is the agent, but the model is still
+the reasoning engine that answers, plans, and writes patches.
+
+### Option A: OpenAI-Compatible API
+
+Use this for OpenAI or any server that exposes an OpenAI-compatible API.
 
 ```bash
+AGENT_ZERO_PROVIDER=openai
 AGENT_ZERO_BASE_URL=https://api.openai.com/v1
 AGENT_ZERO_API_KEY=your_api_key_here
 AGENT_ZERO_MODEL=gpt-4.1-mini
 ```
 
-For a local model server, point `AGENT_ZERO_BASE_URL` at the local OpenAI-compatible endpoint and set `AGENT_ZERO_MODEL` to the local model name.
+### Option B: Internal Bedrock Gateway
 
-Example:
-
-```bash
-AGENT_ZERO_BASE_URL=http://localhost:1234/v1
-AGENT_ZERO_API_KEY=not-needed
-AGENT_ZERO_MODEL=qwen2.5-coder
-```
-
-For an internal Bedrock gateway, use:
+Use this when your organization exposes Bedrock through an async HTTP gateway.
 
 ```bash
 AGENT_ZERO_PROVIDER=bedrock
 AGENT_ZERO_MODEL=anthropic.claude-haiku-4-5-20251001-v1:0
-AGENT_ZERO_BEDROCK_URL=https://mqa2x0ppb5.execute-api.us-east-1.amazonaws.com/dev/ai/v1/bedrock
+AGENT_ZERO_BEDROCK_URL=https://your-gateway.example.com/dev/ai/v1/bedrock
 AGENT_ZERO_BEDROCK_AUTH_HEADER=x-api-key: your_key_here
 AGENT_ZERO_BEDROCK_TENANT_ID=11221122
 AGENT_ZERO_TOP_P=0.2
@@ -151,134 +215,578 @@ AGENT_ZERO_BEDROCK_POLL_INTERVAL_SECONDS=1
 AGENT_ZERO_BEDROCK_TIMEOUT_SECONDS=120
 ```
 
-`AGENT_ZERO_BEDROCK_AUTH_HEADER` should contain the full header name and value in `Header-Name: value` format. Do not commit real API keys or gateway URLs.
-
-The Bedrock gateway is asynchronous. Agent Zero submits a `POST` request, extracts the returned request id, then polls:
+The Bedrock gateway flow is asynchronous:
 
 ```text
-GET {AGENT_ZERO_BEDROCK_URL}/{request_id}?tenantId={AGENT_ZERO_BEDROCK_TENANT_ID}
+POST {AGENT_ZERO_BEDROCK_URL}
+  -> returns request id
+
+GET {AGENT_ZERO_BEDROCK_URL}/{request_id}?tenantId={tenant_id}
+  -> returns final model response
 ```
 
-until the gateway returns completed content or the timeout is reached.
+Agent Zero handles the polling loop for you.
 
-Run the CLI from source:
+### Option C: Local OpenAI-Compatible Server
+
+If your machine can run a local model server, point Agent Zero at it:
+
+```bash
+AGENT_ZERO_PROVIDER=openai
+AGENT_ZERO_BASE_URL=http://localhost:1234/v1
+AGENT_ZERO_API_KEY=not-needed
+AGENT_ZERO_MODEL=qwen2.5-coder
+```
+
+This is useful for learning portability, but local model setup depends on your
+machine and network restrictions.
+
+## Configure Validation
+
+`code` mode can run a validation command after applying a patch.
+
+Recommended:
+
+```bash
+AGENT_ZERO_VALIDATION_COMMAND=.venv/bin/python -m pytest
+AGENT_ZERO_VALIDATION_TIMEOUT_SECONDS=120
+```
+
+When validation fails, Agent Zero sends the failure output back to the model and
+allows one corrective patch attempt.
+
+The retry limit is intentional. It keeps the first version easy to reason about.
+
+## Configure Token And Cost Tracking
+
+To see estimated cost after each model call, add your model pricing:
+
+```bash
+AGENT_ZERO_INPUT_COST_PER_1M_TOKENS=1
+AGENT_ZERO_OUTPUT_COST_PER_1M_TOKENS=5
+```
+
+The formula is:
+
+```text
+(input_tokens / 1,000,000 * input_price) +
+(output_tokens / 1,000,000 * output_price)
+```
+
+If the provider returns token usage, Agent Zero uses it. If the provider does
+not return usage, Agent Zero estimates tokens locally and labels the output as
+estimated.
+
+Example output:
+
+```text
+Estimated tokens: input=12345, output=900, total=13245
+Estimated cost: $0.016845
+```
+
+This makes the context and cost tradeoff visible while you experiment.
+
+## Run The Agent
+
+### Ask Mode
+
+Use `ask` for repo-aware questions without editing files.
 
 ```bash
 python -m agent_zero ask "What does this project do?"
 ```
 
-If you want the `agent-zero` console command, install the project in editable mode:
+What happens internally:
+
+1. The CLI loads `.env`.
+2. Agent Zero builds the `ask` system prompt.
+3. It scans the repository.
+4. It ranks files based on the user question.
+5. It sends selected context to the model.
+6. It prints the answer.
+7. It prints token and cost information when available.
+
+Use it for questions like:
 
 ```bash
-pip install -e .
+python -m agent_zero ask "How does context selection work?"
+python -m agent_zero ask "Where is the Bedrock gateway implemented?"
+python -m agent_zero ask "What safety checks exist before editing files?"
 ```
 
-## First Milestone
+### Plan Mode
 
-The first useful version should be able to:
+Use `plan` before editing. It is read-only.
 
-1. Accept a user task from the CLI.
-2. Inspect a small repository using file and search tools.
-3. Produce a short implementation plan.
-4. Apply a patch.
-5. Run a validation command.
-6. Summarize what changed and whether validation passed.
+```bash
+python -m agent_zero plan "Add support for configurable ignored paths"
+```
 
-For the detailed build plan, see [Agent Zero High-Level Design](docs/high-level-design.md).
+What happens internally:
 
-## Current Status
+1. The CLI loads configuration.
+2. Agent Zero builds repository context.
+3. It asks the model for a structured implementation plan.
+4. The model returns summary, files, steps, validation, risks, and confidence.
+5. No files are modified.
 
-Milestone 0 is complete:
+This mode is useful when you want to understand the blast radius before writing
+code.
 
-- Python package skeleton.
-- Typer CLI with `ask`, `plan`, and `code` commands.
-- `.env` based configuration loader.
-- Smoke tests for the CLI and config loader.
+### Code Mode
 
-Milestone 1 is in place:
+Use `code` for one focused change.
+
+```bash
+python -m agent_zero code "Add a short note to README saying Agent Zero is a learning project"
+```
+
+What happens internally:
+
+1. Agent Zero builds repository context.
+2. It asks the model for a unified diff.
+3. It extracts the diff from the model response.
+4. It checks that paths are safe.
+5. It applies the patch.
+6. It runs the configured validation command.
+7. If validation fails, it asks for one fix patch.
+8. It prints changed files, validation status, tokens, and cost.
+
+Agent Zero does not commit changes. You stay in control of git.
+
+Use `--dry-run` when you want to inspect the model's patch before Agent Zero
+applies it:
+
+```bash
+python -m agent_zero code "Add a short README note" --dry-run
+```
+
+Dry run behavior:
+
+1. Agent Zero still builds repository context.
+2. It still calls the model.
+3. It still extracts a unified diff.
+4. It prints the proposed patch.
+5. It does not change files.
+6. It does not run validation.
+7. It still prints token and cost information.
+
+This is useful when you want to separate patch generation from patch execution.
+
+### Eval Mode
+
+Use `eval` when you want to run the same task repeatedly and compare behavior
+across models, prompts, or context changes.
+
+```bash
+python -m agent_zero eval evals/ask-project.json
+```
+
+An eval file is small JSON:
+
+```json
+{
+  "name": "ask-project-overview",
+  "mode": "ask",
+  "task": "What does this project do?"
+}
+```
+
+For `code` evals, you can also override validation:
+
+```json
+{
+  "name": "readme-note",
+  "mode": "code",
+  "task": "Add one sentence to README explaining that Agent Zero does not commit changes",
+  "validation_command": ".venv/bin/python -m pytest"
+}
+```
+
+Agent Zero writes a timestamped JSON result under `eval-results/`:
+
+```json
+{
+  "name": "ask-project-overview",
+  "mode": "ask",
+  "success": true,
+  "status": "ask_completed",
+  "provider": "bedrock",
+  "model": "anthropic.claude-haiku-4-5-20251001-v1:0",
+  "model_calls": [
+    {
+      "purpose": "initial",
+      "usage": {
+        "input_tokens": 12345,
+        "output_tokens": 900,
+        "total_tokens": 13245,
+        "estimated": true,
+        "estimated_cost": "$0.016845"
+      }
+    }
+  ]
+}
+```
+
+For `code` evals, the result also records changed files, validation output, and
+retry details when validation fails.
+
+This is the start of making Agent Zero measurable: same task, same repository,
+different model or prompt, comparable result.
+
+## Example Learning Session
+
+Try this sequence when exploring the project for the first time.
+
+### Step 1: Ask what exists
+
+```bash
+python -m agent_zero ask "What does this project do?"
+```
+
+You should see a repo-aware answer that mentions the CLI, config, model client,
+context builder, tools, and tests.
+
+### Step 2: Ask how a specific command works
+
+```bash
+python -m agent_zero ask "What happens when I run python -m agent_zero ask?"
+```
+
+This helps connect the command line experience to the code path.
+
+### Step 3: Plan a change
+
+```bash
+python -m agent_zero plan "Add a dry-run flag to code mode"
+```
+
+Read the plan. Check whether the selected files make sense.
+
+### Step 4: Make a tiny change
+
+```bash
+python -m agent_zero code "Add one sentence to README explaining that Agent Zero does not commit changes"
+```
+
+Inspect the diff afterward:
+
+```bash
+git diff
+```
+
+### Step 5: Run validation manually
+
+```bash
+.venv/bin/python -m pytest
+.venv/bin/python -m ruff format --check .
+.venv/bin/python -m ruff check .
+```
+
+This closes the learning loop: prompt, context, patch, validation, review.
+
+### Step 6: Run a repeatable eval
+
+```bash
+python -m agent_zero eval evals/ask-project.json
+```
+
+Open the generated JSON file in `eval-results/` and compare the recorded status,
+response, token usage, and estimated cost.
+
+## Milestone Walkthrough
+
+Agent Zero was built in milestones so each piece is understandable.
+
+### Milestone 0: Runnable Skeleton
+
+Goal: make the project importable and executable.
+
+Built:
+
+- Python package structure.
+- `python -m agent_zero` entry point.
+- Typer CLI with `ask`, `plan`, and `code`.
+- `.env` based config loading.
+- First smoke tests.
+
+Learning outcome:
+
+- A coding agent starts as a normal CLI application.
+
+### Milestone 1: Model Calls
+
+Goal: connect the CLI to a model.
+
+Built:
 
 - OpenAI-compatible model client.
-- Internal Bedrock gateway model client.
-- `ask` sends the user question to the configured model.
-- Token usage is printed when the API returns usage data.
+- Internal Bedrock gateway client.
+- Clean model error handling.
+- Token usage capture when providers return usage.
 
-Milestone 2 is in place:
+Learning outcome:
 
-- Read-only repository file listing.
-- Safe text file reads that ignore secrets, caches, virtualenvs, and IDE files.
-- Simple text search over repository files.
-- Query-aware context ranking using path matches, content search hits, and small overview priors.
-- Context selection reasons are included in the prompt for easier debugging.
-- `ask` sends selected repository context to the configured model.
+- The model client should hide provider details from the rest of the app.
 
-Milestone 3 is in place:
+### Milestone 2: Repository Context
 
-- `plan` sends the change request and selected repository context to the configured model.
-- Plan mode asks for summary, relevant files, implementation steps, validation steps, risks, and confidence score.
-- Plan mode remains read-only.
+Goal: give the model useful context without reading everything.
 
-Milestone 4A is in place:
+Built:
 
-- Unified-diff patch tool for text files.
-- Safety checks for path traversal, ignored files, non-text files, and context mismatches.
-- Tests for updating existing files, creating new files, and refusing unsafe patches.
+- Safe file listing.
+- Safe text file reading.
+- Search.
+- Query-aware context ranking.
+- Context selection reasons.
 
-Milestone 4B is in place:
+Learning outcome:
 
-- `code` asks the model for a unified diff.
-- Model responses can include plain diffs or fenced diff blocks.
-- `code` applies the patch and reports changed files.
-- Patch failures are reported without committing anything.
+- Better context usually beats more context.
 
-Milestone 5 is in place:
+### Milestone 3: Plan Mode
 
-- Optional validation command after `code` applies a patch.
-- Validation output includes command, pass/fail status, stdout, stderr, and timeout handling.
-- Validation is configured with `AGENT_ZERO_VALIDATION_COMMAND`.
-- On validation failure, `code` asks the model for one corrective diff and reruns validation once.
+Goal: analyze before editing.
 
-The validation loop is intentionally capped at one retry for now.
+Built:
+
+- Dedicated `plan` prompt.
+- Structured output with summary, files, implementation steps, validation steps,
+  risks, and confidence.
+- Read-only behavior.
+
+Learning outcome:
+
+- Planning gives humans a chance to inspect the intended path before code
+  changes happen.
+
+### Milestone 4: Patch Application
+
+Goal: let the model edit safely.
+
+Built:
+
+- Unified diff extraction.
+- Safe patch application.
+- Refusal for ignored files, unsafe paths, binary files, and context mismatch.
+- Tests for patch success and failure.
+
+Learning outcome:
+
+- A coding agent should apply structured changes, not paste uncontrolled text
+  into files.
+
+### Milestone 5: Validation Loop
+
+Goal: check whether the change worked.
+
+Built:
+
+- Configurable validation command.
+- Captured stdout, stderr, exit code, and timeout.
+- One retry after validation failure.
+
+Learning outcome:
+
+- Validation is the feedback loop that makes the agent useful for coding.
+
+### Milestone 6: Token And Cost Tracking
+
+Goal: make cost visible.
+
+Built:
+
+- Usage capture from provider responses.
+- Local token estimation when usage is missing.
+- Optional price configuration.
+- Per-run estimated cost output.
+
+Learning outcome:
+
+- Cost is a product of context size, output size, and model pricing.
+
+### Milestone 7: Evaluation Tasks
+
+Goal: make agent behavior comparable across runs.
+
+Built:
+
+- JSON eval spec format.
+- `eval` CLI command.
+- Timestamped result files under `eval-results/`.
+- Structured status, response, validation, changed files, retry, token, and cost
+  reporting.
+- A safe sample eval in `evals/ask-project.json`.
+
+Learning outcome:
+
+- A coding agent should be measured with repeatable tasks, not vibes.
+
+### Milestone 8: Dry Run For Code Mode
+
+Goal: preview edits before applying them.
+
+Built:
+
+- `--dry-run` option for `code`.
+- Diff extraction without patch application.
+- Proposed patch output.
+- Validation skip during dry run.
+- Token and cost reporting for dry-run model calls.
+
+Learning outcome:
+
+- Patch generation and patch execution are separate steps.
 
 ## Design Principles
 
+Agent Zero follows a few rules:
+
 - Read before writing.
-- Prefer small patches over full-file rewrites.
-- Make every tool call observable.
-- Keep prompts versioned and easy to inspect.
+- Keep modes explicit.
+- Prefer small patches.
 - Treat validation failures as useful feedback.
-- Prefer simple control flow over clever abstractions.
-- Optimize for learning before optimizing for scale.
+- Keep tool behavior visible.
+- Avoid framework magic.
+- Keep the code small enough to explain.
+
+## Non-Goals
+
+Agent Zero deliberately avoids some features in the first version:
+
+- MCP integration.
+- Plugin marketplace.
+- Multi-agent orchestration.
+- IDE UI.
+- Remote workspace management.
+- Complex long-term memory.
+- Automatic git commits.
+
+These are interesting, but they would hide the basics too early.
+
+## Safety Notes
+
+Agent Zero is a learning project, not a production coding assistant.
+
+Important rules:
+
+- Do not commit `.env`.
+- Do not place real API keys in docs or tests.
+- Review every generated patch with `git diff`.
+- Keep validation enabled for `code` mode.
+- Start with small changes.
+- Do not run it blindly on important repositories.
 
 ## Development
 
 Run tests:
 
 ```bash
-pytest
+.venv/bin/python -m pytest
+```
+
+Check formatting:
+
+```bash
+.venv/bin/python -m ruff format --check .
 ```
 
 Format code:
 
 ```bash
-ruff format .
+.venv/bin/python -m ruff format .
 ```
 
-Lint code:
+Run lint:
 
 ```bash
-ruff check .
+.venv/bin/python -m ruff check .
 ```
 
-## Blog Series Notes
+Install as a local console command:
 
-This repository is also intended to support a blog series about building a coding agent from scratch.
+```bash
+pip install -e .
+agent-zero ask "What does this project do?"
+```
 
-Possible posts:
+## Troubleshooting
+
+### `ModuleNotFoundError: No module named 'typer'`
+
+You are probably not using the virtual environment.
+
+Fix:
+
+```bash
+source .venv/bin/activate
+pip install -r requirements.txt
+python -m agent_zero ask "What does this project do?"
+```
+
+### No token or cost output
+
+Add pricing values:
+
+```bash
+AGENT_ZERO_INPUT_COST_PER_1M_TOKENS=1
+AGENT_ZERO_OUTPUT_COST_PER_1M_TOKENS=5
+```
+
+If the provider does not return token usage, Agent Zero should print
+`Estimated tokens` instead of `Tokens`.
+
+### Bedrock call times out
+
+Increase:
+
+```bash
+AGENT_ZERO_BEDROCK_TIMEOUT_SECONDS=180
+AGENT_ZERO_BEDROCK_POLL_INTERVAL_SECONDS=2
+```
+
+Also confirm that the gateway returns a request id from `POST` and completed
+content from `GET`.
+
+### Validation fails after a patch
+
+That is expected during development. Agent Zero will try one fix if validation
+is configured. After that, inspect the failure manually:
+
+```bash
+git diff
+.venv/bin/python -m pytest
+```
+
+## Blog Series Outline
+
+This repository can support a practical blog series:
 
 1. Why build a coding agent from scratch?
-2. Designing the basic agent loop.
-3. Building tool calls without a plugin framework.
-4. Planning before editing.
-5. Applying patches safely.
-6. Running validation and learning from failures.
-7. Making local and open source models work better on code.
+2. Turning a CLI into an agent harness.
+3. Calling OpenAI-compatible and Bedrock models.
+4. Building repository context without reading everything.
+5. Designing `ask`, `plan`, and `code` modes.
+6. Asking models for patches instead of prose.
+7. Applying diffs safely.
+8. Running validation and retrying once.
+9. Making token cost visible.
+10. Evaluating model behavior across the same tasks.
+
+## Next Ideas
+
+Good next milestones:
+
+- Better context budgeting.
+- Separate validation commands for tests, lint, and formatting.
+- More detailed patch summaries.
+- Provider-specific usage extraction for Bedrock gateway response variants.
+
+## Final Thought
+
+Agent Zero is small on purpose.
+
+The goal is not to hide the agent loop behind abstractions. The goal is to make
+the loop visible enough that you can point at every step and say: I know what
+the agent is doing, why it is doing it, and how to improve it.

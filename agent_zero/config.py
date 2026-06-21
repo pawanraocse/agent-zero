@@ -47,6 +47,14 @@ class AgentConfig(BaseModel):
         default=120.0,
         alias="AGENT_ZERO_VALIDATION_TIMEOUT_SECONDS",
     )
+    input_cost_per_1m_tokens: float | None = Field(
+        default=None,
+        alias="AGENT_ZERO_INPUT_COST_PER_1M_TOKENS",
+    )
+    output_cost_per_1m_tokens: float | None = Field(
+        default=None,
+        alias="AGENT_ZERO_OUTPUT_COST_PER_1M_TOKENS",
+    )
 
 
 def load_config(env_file: Path | None = None) -> AgentConfig:
@@ -79,6 +87,12 @@ def load_config(env_file: Path | None = None) -> AgentConfig:
         "AGENT_ZERO_VALIDATION_TIMEOUT_SECONDS": env_values.get(
             "AGENT_ZERO_VALIDATION_TIMEOUT_SECONDS",
             "120.0",
+        ),
+        "AGENT_ZERO_INPUT_COST_PER_1M_TOKENS": env_values.get(
+            "AGENT_ZERO_INPUT_COST_PER_1M_TOKENS"
+        ),
+        "AGENT_ZERO_OUTPUT_COST_PER_1M_TOKENS": env_values.get(
+            "AGENT_ZERO_OUTPUT_COST_PER_1M_TOKENS"
         ),
     }
 

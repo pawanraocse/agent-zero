@@ -1,0 +1,5 @@
+{
+  "name": "ask-project-overview",
+  "mode": "ask",
+  "task": "What does this project do?"
+}

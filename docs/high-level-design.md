@@ -373,9 +373,9 @@ Goal: make token usage visible.
 
 Steps:
 
-1. Capture usage data from model responses.
-2. Estimate cost from model config.
-3. Print per-run usage.
+1. Capture usage data from model responses. Done.
+2. Estimate cost from model config. Done.
+3. Print per-run usage. Done.
 4. Compare local and hosted model behavior.
 
 Learning outcome:
@@ -388,13 +388,28 @@ Goal: compare behavior across models and prompts.
 
 Steps:
 
-1. Create small test repositories or tasks.
-2. Run the same task across models.
-3. Record success, failures, token usage, and validation result.
+1. Create small test repositories or tasks. Started with JSON eval specs.
+2. Run the same task across models. Started with the `eval` CLI command.
+3. Record success, failures, token usage, and validation result. Done.
 
 Learning outcome:
 
 - Understand where smaller open source models work well and where they struggle.
+
+### Milestone 8: Dry Run For Code Mode
+
+Goal: preview generated patches before files are changed.
+
+Steps:
+
+1. Add a `--dry-run` option to `code`. Done.
+2. Extract and print the proposed unified diff. Done.
+3. Skip patch application and validation. Done.
+4. Still report token usage and estimated cost. Done.
+
+Learning outcome:
+
+- Understand that patch generation and patch execution are two separate phases.
 
 ## Suggested Implementation Order
 
@@ -412,6 +427,7 @@ Build in this order:
 10. Validation.
 11. Token tracking.
 12. Evaluations.
+13. Dry run.
 
 Each step should leave the project runnable.
 

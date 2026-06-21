@@ -13,6 +13,7 @@ IGNORED_DIRS = {
     "__pycache__",
     "agent_zero.egg-info",
     "dist",
+    "eval-results",
     "build",
 }
 
