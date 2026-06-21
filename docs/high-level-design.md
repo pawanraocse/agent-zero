@@ -411,6 +411,38 @@ Learning outcome:
 
 - Understand that patch generation and patch execution are two separate phases.
 
+### Milestone 9: Patch Summaries
+
+Goal: report deterministic patch size information.
+
+Steps:
+
+1. Parse unified diffs into per-file additions and deletions. Done.
+2. Print patch summaries in normal `code` mode. Done.
+3. Print patch summaries in `code --dry-run`. Done.
+4. Store patch summaries in code eval results. Done.
+
+Learning outcome:
+
+- Understand why agent reports should include measurable facts, not only model
+  explanations.
+
+### Milestone 10: Narrative Repo Index
+
+Goal: build a local memory map that improves context selection.
+
+Steps:
+
+1. Add an `index` command. Done.
+2. Generate `.agent-zero/index.json`. Done.
+3. Store file summaries, concepts, symbols, imports, and relationships. Done.
+4. Use index concepts and relationships as retrieval signals. Done.
+
+Learning outcome:
+
+- Understand how external memory can make an agent better at finding relevant
+  files without changing the model itself.
+
 ## Suggested Implementation Order
 
 Build in this order:
@@ -428,6 +460,8 @@ Build in this order:
 11. Token tracking.
 12. Evaluations.
 13. Dry run.
+14. Patch summaries.
+15. Narrative repo index.
 
 Each step should leave the project runnable.
 

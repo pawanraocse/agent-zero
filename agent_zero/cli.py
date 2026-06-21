@@ -9,8 +9,19 @@ from agent_zero.diff_parser import (
     extract_unified_diff,
     is_no_change_response,
 )
+from agent_zero.diff_summary import (
+    diff_summary_to_dicts,
+    format_diff_summary,
+    summarize_unified_diff,
+)
 from agent_zero.evals import EvalSpec, EvalSpecError, load_eval_spec, write_eval_result
 from agent_zero.model_client import ModelClientError, create_model_client
+from agent_zero.repo_index import (
+    build_repo_index,
+    index_file_count,
+    index_relationship_count,
+    write_repo_index,
+)
 from agent_zero.tools.command_tool import CommandRunError, CommandResult, run_command
 from agent_zero.tools.patch_tool import PatchApplyError, apply_unified_diff
 from agent_zero.usage import estimate_usage_cost, format_usage_cost, resolve_token_usage
@@ -175,6 +186,24 @@ def plan(
     _print_model_response(response, config, PLAN_SYSTEM_PROMPT, user_prompt)
 
 
+@app.command("index")
+def index_command(
+    output: Path | None = typer.Option(
+        None,
+        "--output",
+        help="Optional output path. Defaults to .agent-zero/index.json.",
+    ),
+) -> None:
+    """Build a narrative repository index for context selection."""
+    root = Path.cwd()
+    index = build_repo_index(root)
+    output_path = write_repo_index(root, output)
+
+    typer.echo(f"Index written: {output_path}")
+    typer.echo(f"Files indexed: {index_file_count(index)}")
+    typer.echo(f"Relationships: {index_relationship_count(index)}")
+
+
 @app.command()
 def code(
     task: str = typer.Argument(..., help="Change request to implement."),
@@ -206,8 +235,10 @@ def code(
         typer.echo(response.content)
         raise typer.Exit(code=1) from exc
 
+    diff_summary = summarize_unified_diff(diff_text)
     if dry_run:
         typer.echo("Dry run: no files changed.")
+        _print_patch_summary(diff_summary)
         typer.echo("")
         typer.echo("Proposed patch:")
         typer.echo(diff_text)
@@ -224,6 +255,7 @@ def code(
     typer.echo("Changed files:")
     for changed_file in patch_result.changed_files:
         typer.echo(f"- {changed_file}")
+    _print_patch_summary(diff_summary)
 
     validation_result = _run_validation(config)
     if not _print_validation_result(validation_result, exit_on_failure=False):
@@ -332,9 +364,11 @@ def _run_code_eval(
     model_calls: list[dict],
 ) -> dict:
     changed_files: list[str] = []
+    diff_summary = []
 
     try:
         diff_text = extract_unified_diff(initial_response.content)
+        diff_summary = summarize_unified_diff(diff_text)
         patch_result = apply_unified_diff(Path.cwd(), diff_text)
         changed_files.extend(patch_result.changed_files)
     except DiffExtractionError:
@@ -365,6 +399,7 @@ def _run_code_eval(
             status="patch_failed",
             response=initial_response.content,
             changed_files=changed_files,
+            patch_summary=diff_summary,
             model_calls=model_calls,
             error=str(exc),
         )
@@ -378,6 +413,7 @@ def _run_code_eval(
             status="validation_passed",
             response=initial_response.content,
             changed_files=changed_files,
+            patch_summary=diff_summary,
             validation=validation_result,
             model_calls=model_calls,
         )
@@ -397,6 +433,7 @@ def _run_code_eval(
         status=retry_result["status"],
         response=initial_response.content,
         changed_files=changed_files + retry_result["changed_files"],
+        patch_summary=diff_summary,
         validation=retry_result["validation"],
         model_calls=model_calls,
         retry=retry_result["retry"],
@@ -441,6 +478,7 @@ def _run_eval_retry(
 
     try:
         retry_diff_text = extract_unified_diff(retry_response.content)
+        retry_diff_summary = summarize_unified_diff(retry_diff_text)
         retry_patch_result = apply_unified_diff(Path.cwd(), retry_diff_text)
     except (DiffExtractionError, PatchApplyError) as exc:
         return {
@@ -467,6 +505,7 @@ def _run_eval_retry(
         "retry": {
             "response": retry_response.content,
             "changed_files": retry_patch_result.changed_files,
+            "patch_summary": diff_summary_to_dicts(retry_diff_summary),
         },
     }
 
@@ -512,6 +551,7 @@ def _base_eval_result(
     response: str,
     model_calls: list[dict],
     changed_files: list[str] | None = None,
+    patch_summary: list | None = None,
     validation: CommandResult | None = None,
     retry: dict | None = None,
     error: str | None = None,
@@ -525,6 +565,7 @@ def _base_eval_result(
         "success": success,
         "status": status,
         "changed_files": changed_files or [],
+        "patch_summary": diff_summary_to_dicts(patch_summary or []),
         "validation": _validation_summary(validation),
         "model_calls": model_calls,
         "response": response,
@@ -536,6 +577,12 @@ def _base_eval_result(
         result["error"] = error
 
     return result
+
+
+def _print_patch_summary(summary) -> None:
+    typer.echo("")
+    typer.echo("Patch summary:")
+    typer.echo(format_diff_summary(summary))
 
 
 def _validation_summary(result: CommandResult | None) -> dict | None:

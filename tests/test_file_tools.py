@@ -9,6 +9,9 @@ def test_list_files_excludes_secrets_and_caches(tmp_path):
     cache = tmp_path / "__pycache__"
     cache.mkdir()
     (cache / "module.pyc").write_bytes(b"compiled")
+    memory = tmp_path / ".agent-zero"
+    memory.mkdir()
+    (memory / "index.json").write_text("{}", encoding="utf-8")
 
     assert list_files(tmp_path) == ["README.md"]
 

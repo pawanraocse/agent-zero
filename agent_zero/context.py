@@ -1,6 +1,11 @@
 from dataclasses import dataclass
 from pathlib import Path
 
+from agent_zero.repo_index import (
+    index_entries_by_path,
+    index_relationships,
+    load_repo_index,
+)
 from agent_zero.tools.file_tools import (
     FileSnippet,
     list_files,
@@ -40,6 +45,7 @@ class ContextDecision:
     query_terms: list[str]
     selected_files: list[str]
     reasons: dict[str, list[str]]
+    index_used: bool = False
 
 
 @dataclass(frozen=True)
@@ -88,11 +94,13 @@ def build_repository_context(
     """Build a small read-only context package for ask mode."""
     files = list_files(root, max_files=max_files)
     search_results = search_text(root, task)
+    repo_index = load_repo_index(root)
     decision = decide_context_files(
         files=files,
         task=task,
         search_results=search_results,
         max_snippets=max_snippets,
+        repo_index=repo_index,
     )
     snippets = []
 
@@ -116,19 +124,28 @@ def decide_context_files(
     task: str,
     search_results: list[str],
     max_snippets: int,
+    repo_index: dict | None = None,
 ) -> ContextDecision:
     terms = _query_terms(task)
     search_paths = _paths_from_search_results(search_results)
+    index_entries = index_entries_by_path(repo_index)
     scores: dict[str, int] = {}
     reasons: dict[str, list[str]] = {}
 
     for path in files:
         if not _is_likely_text_context(path):
             continue
-        score, path_reasons = _score_file(path, terms, search_paths)
+        score, path_reasons = _score_file(
+            path,
+            terms,
+            search_paths,
+            index_entries.get(path),
+        )
         if score > 0:
             scores[path] = score
             reasons[path] = path_reasons
+
+    _apply_index_relationship_boosts(scores, reasons, index_relationships(repo_index))
 
     if not scores or _looks_like_overview_question(task, terms):
         for path, score in OVERVIEW_PRIORS.items():
@@ -143,6 +160,7 @@ def decide_context_files(
         query_terms=terms,
         selected_files=selected_files,
         reasons={path: reasons[path] for path in selected_files},
+        index_used=bool(repo_index),
     )
 
 
@@ -150,6 +168,7 @@ def _score_file(
     path: str,
     terms: list[str],
     search_paths: list[str],
+    index_entry: dict | None = None,
 ) -> tuple[int, list[str]]:
     score = 0
     reasons = []
@@ -175,12 +194,74 @@ def _score_file(
         score += 8
         reasons.append("content search hit")
 
+    index_score, index_reasons = _score_index_entry(index_entry, terms)
+    if index_score:
+        score += index_score
+        reasons.extend(index_reasons)
+
     priority = _file_priority(path)
     if score > 0 and priority:
         score += priority
         reasons.append(f"path priority {priority}")
 
     return score, reasons
+
+
+def _score_index_entry(
+    index_entry: dict | None,
+    terms: list[str],
+) -> tuple[int, list[str]]:
+    if not index_entry:
+        return 0, []
+
+    score = 0
+    reasons = []
+    concepts = _string_list(index_entry.get("concepts"))
+    symbols = _string_list(index_entry.get("symbols"))
+    summary = str(index_entry.get("summary", "")).lower()
+
+    concept_matches = [term for term in terms if term in concepts]
+    symbol_matches = [
+        term
+        for term in terms
+        if any(term in _normalize(symbol).split() for symbol in symbols)
+    ]
+    summary_matches = [term for term in terms if term in _normalize(summary).split()]
+
+    if concept_matches:
+        score += 6 * len(concept_matches)
+        reasons.append(f"index concept matches: {', '.join(concept_matches)}")
+    if symbol_matches:
+        score += 4 * len(symbol_matches)
+        reasons.append(f"index symbol matches: {', '.join(symbol_matches)}")
+    if summary_matches:
+        score += 3 * len(summary_matches)
+        reasons.append(f"index summary matches: {', '.join(summary_matches)}")
+
+    return score, reasons
+
+
+def _apply_index_relationship_boosts(
+    scores: dict[str, int],
+    reasons: dict[str, list[str]],
+    relationships: list[dict[str, str]],
+) -> None:
+    seeded_paths = {path for path, score in scores.items() if score > 0}
+    for relationship in relationships:
+        source = relationship["from"]
+        target = relationship["to"]
+        relationship_type = relationship["type"]
+
+        if source in seeded_paths and target not in seeded_paths:
+            scores[target] = scores.get(target, 0) + 3
+            reasons.setdefault(target, []).append(
+                f"index related via {relationship_type}: {source}"
+            )
+        if target in seeded_paths and source not in seeded_paths:
+            scores[source] = scores.get(source, 0) + 3
+            reasons.setdefault(source, []).append(
+                f"index related via {relationship_type}: {target}"
+            )
 
 
 def _file_priority(path: str) -> int:
@@ -227,7 +308,10 @@ def _format_context_decision(decision: ContextDecision) -> str:
     if not decision.selected_files:
         return "(no files selected)"
 
-    lines = [f"Query terms: {', '.join(decision.query_terms) or '(none)'}"]
+    lines = [
+        f"Query terms: {', '.join(decision.query_terms) or '(none)'}",
+        f"Repo index: {'used' if decision.index_used else 'not found'}",
+    ]
     for path in decision.selected_files:
         reason_text = "; ".join(decision.reasons.get(path, [])) or "selected"
         lines.append(f"- {path}: {reason_text}")
@@ -238,3 +322,9 @@ def _is_likely_text_context(path: str) -> bool:
     return path.endswith(
         (".example", ".md", ".py", ".toml", ".txt", ".yaml", ".yml", ".json")
     )
+
+
+def _string_list(value) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [item.lower() for item in value if isinstance(item, str)]

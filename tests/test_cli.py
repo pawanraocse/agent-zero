@@ -285,6 +285,30 @@ def test_plan_command_reports_missing_config(tmp_path):
     assert "Missing required configuration" in result.output
 
 
+def test_index_command_writes_repo_index(tmp_path, monkeypatch):
+    (tmp_path / "README.md").write_text("# Agent Zero\n", encoding="utf-8")
+    package = tmp_path / "agent_zero"
+    package.mkdir()
+    (package / "config.py").write_text(
+        "def load_config():\n    return None\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "custom-index.json"
+    monkeypatch.chdir(tmp_path)
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["index", "--output", str(output)])
+
+    assert result.exit_code == 0
+    assert "Index written:" in result.output
+    assert "Files indexed: 2" in result.output
+    data = json.loads(output.read_text(encoding="utf-8"))
+    assert [entry["path"] for entry in data["files"]] == [
+        "README.md",
+        "agent_zero/config.py",
+    ]
+
+
 def test_eval_command_runs_ask_eval_and_writes_result(tmp_path, monkeypatch):
     env_file = tmp_path / ".env"
     env_file.write_text(
@@ -428,6 +452,9 @@ def test_eval_command_runs_code_eval_and_writes_validation_result(
     assert data["success"] is True
     assert data["status"] == "validation_passed"
     assert data["changed_files"] == ["hello.txt"]
+    assert data["patch_summary"] == [
+        {"path": "hello.txt", "additions": 1, "deletions": 1}
+    ]
     assert data["validation"]["passed"] is True
     assert data["validation"]["command"] == ["pytest"]
 
@@ -474,6 +501,8 @@ diff --git a/hello.txt b/hello.txt
     assert result.exit_code == 0
     assert "Applied patch." in result.output
     assert "- hello.txt" in result.output
+    assert "Patch summary:" in result.output
+    assert "- hello.txt: +1 -1" in result.output
     assert "Validation skipped" in result.output
     assert "Tokens: input=30, output=20, total=50" in result.output
     assert target.read_text(encoding="utf-8") == "new\n"
@@ -531,6 +560,8 @@ def test_code_command_dry_run_prints_patch_without_changing_files(
 
     assert result.exit_code == 0
     assert "Dry run: no files changed." in result.output
+    assert "Patch summary:" in result.output
+    assert "- hello.txt: +1 -1" in result.output
     assert "Proposed patch:" in result.output
     assert "diff --git a/hello.txt b/hello.txt" in result.output
     assert "Applied patch." not in result.output

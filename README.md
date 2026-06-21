@@ -288,6 +288,34 @@ This makes the context and cost tradeoff visible while you experiment.
 
 ## Run The Agent
 
+### Index Mode
+
+Use `index` to build a local narrative map of the repository:
+
+```bash
+python -m agent_zero index
+```
+
+This writes:
+
+```text
+.agent-zero/index.json
+```
+
+The generated index stores:
+
+- file summaries
+- concepts
+- Python symbols
+- local imports
+- relationships such as `imports`, `tests`, and `mentions`
+
+Agent Zero uses this index during context selection when it exists. The index is
+not a replacement for reading files; it is a map that helps the agent decide
+which files are worth reading first.
+
+The index is ignored by git because it is generated local memory.
+
 ### Ask Mode
 
 Use `ask` for repo-aware questions without editing files.
@@ -301,10 +329,11 @@ What happens internally:
 1. The CLI loads `.env`.
 2. Agent Zero builds the `ask` system prompt.
 3. It scans the repository.
-4. It ranks files based on the user question.
-5. It sends selected context to the model.
-6. It prints the answer.
-7. It prints token and cost information when available.
+4. It uses `.agent-zero/index.json` if available.
+5. It ranks files based on the user question, index concepts, and relationships.
+6. It sends selected context to the model.
+7. It prints the answer.
+8. It prints token and cost information when available.
 
 Use it for questions like:
 
@@ -350,7 +379,7 @@ What happens internally:
 5. It applies the patch.
 6. It runs the configured validation command.
 7. If validation fails, it asks for one fix patch.
-8. It prints changed files, validation status, tokens, and cost.
+8. It prints changed files, patch summary, validation status, tokens, and cost.
 
 Agent Zero does not commit changes. You stay in control of git.
 
@@ -366,10 +395,11 @@ Dry run behavior:
 1. Agent Zero still builds repository context.
 2. It still calls the model.
 3. It still extracts a unified diff.
-4. It prints the proposed patch.
-5. It does not change files.
-6. It does not run validation.
-7. It still prints token and cost information.
+4. It prints a patch summary.
+5. It prints the proposed patch.
+6. It does not change files.
+7. It does not run validation.
+8. It still prints token and cost information.
 
 This is useful when you want to separate patch generation from patch execution.
 
@@ -428,8 +458,9 @@ Agent Zero writes a timestamped JSON result under `eval-results/`:
 }
 ```
 
-For `code` evals, the result also records changed files, validation output, and
-retry details when validation fails.
+For `code` evals, the result also records changed files, patch summary,
+validation output, and retry details when validation fails. Patch summaries are
+deterministic counts from the unified diff, not model-written prose.
 
 This is the start of making Agent Zero measurable: same task, same repository,
 different model or prompt, comparable result.
@@ -631,6 +662,7 @@ Built:
 
 - `--dry-run` option for `code`.
 - Diff extraction without patch application.
+- Patch summary output.
 - Proposed patch output.
 - Validation skip during dry run.
 - Token and cost reporting for dry-run model calls.
@@ -638,6 +670,40 @@ Built:
 Learning outcome:
 
 - Patch generation and patch execution are separate steps.
+
+### Milestone 9: Patch Summaries
+
+Goal: make patch size visible before and after edits.
+
+Built:
+
+- Deterministic unified diff summary parser.
+- Per-file additions and deletions.
+- Patch summary output in normal `code` mode.
+- Patch summary output in `code --dry-run`.
+- Patch summary field in code eval result JSON.
+
+Learning outcome:
+
+- Agent output should include measurable facts about a proposed change, not only
+  model-written explanations.
+
+### Milestone 10: Narrative Repo Index
+
+Goal: move from plain keyword ranking toward a repository memory graph.
+
+Built:
+
+- `index` CLI command.
+- Generated `.agent-zero/index.json`.
+- Deterministic file summaries, concepts, symbols, and local imports.
+- Relationship extraction for imports, tests, and mentions.
+- Context selection boost from index concepts and relationships.
+
+Learning outcome:
+
+- A coding agent can improve retrieval by maintaining external memory about the
+  repository, even without changing model weights.
 
 ## Design Principles
 

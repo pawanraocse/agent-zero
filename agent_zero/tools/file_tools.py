@@ -4,6 +4,7 @@ from pathlib import Path
 
 IGNORED_DIRS = {
     ".git",
+    ".agent-zero",
     ".idea",
     ".mypy_cache",
     ".pytest_cache",

@@ -71,3 +71,49 @@ def test_decide_context_files_can_select_unclassified_domain_files():
         "agent_zero/payment_gateway.py",
         "tests/test_payment_gateway.py",
     ]
+
+
+def test_decide_context_files_uses_repo_index_concepts():
+    files = [
+        "agent_zero/model_client.py",
+        "agent_zero/config.py",
+    ]
+    repo_index = {
+        "files": [
+            {
+                "path": "agent_zero/model_client.py",
+                "summary": "Handles hosted model providers.",
+                "concepts": ["bedrock", "gateway", "model"],
+                "symbols": ["BedrockGatewayClient"],
+            }
+        ],
+        "relationships": [
+            {
+                "from": "agent_zero/config.py",
+                "to": "agent_zero/model_client.py",
+                "type": "imports",
+            }
+        ],
+    }
+
+    decision = decide_context_files(
+        files=files,
+        task="How does bedrock work?",
+        search_results=[],
+        max_snippets=2,
+        repo_index=repo_index,
+    )
+
+    assert decision.index_used is True
+    assert decision.selected_files == [
+        "agent_zero/model_client.py",
+        "agent_zero/config.py",
+    ]
+    assert (
+        "index concept matches: bedrock"
+        in decision.reasons["agent_zero/model_client.py"]
+    )
+    assert (
+        "index related via imports: agent_zero/model_client.py"
+        in decision.reasons["agent_zero/config.py"]
+    )
