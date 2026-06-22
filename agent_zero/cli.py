@@ -1,5 +1,6 @@
 from pathlib import Path
 import os
+from dataclasses import dataclass
 
 import typer
 
@@ -11,6 +12,7 @@ from agent_zero.diff_parser import (
     is_no_change_response,
 )
 from agent_zero.diff_summary import (
+    diff_summary_has_changes,
     diff_summary_to_dicts,
     format_diff_summary,
     summarize_unified_diff,
@@ -67,6 +69,54 @@ Use the original change request, changed files, and validation output.
 Return one corrective unified diff only.
 Keep the fix as small as possible.
 If there is no safe correction, explain why without a diff."""
+
+FIX_EMPTY_PATCH_SYSTEM_PROMPT = """You are Agent Zero fixing an empty patch.
+The previous response contained a unified diff, but it had zero additions and
+zero deletions, so it would not change the repository.
+Return one corrected unified diff only.
+If no repository change is actually needed, explain why without a diff."""
+
+
+@dataclass(frozen=True)
+class ValidationStepResult:
+    label: str
+    result: CommandResult
+
+
+@dataclass(frozen=True)
+class ValidationResult:
+    steps: list[ValidationStepResult]
+
+    @property
+    def passed(self) -> bool:
+        return all(step.result.passed for step in self.steps)
+
+    @property
+    def final_step(self) -> ValidationStepResult:
+        for step in self.steps:
+            if not step.result.passed:
+                return step
+        return self.steps[-1]
+
+    @property
+    def command(self) -> list[str]:
+        return self.final_step.result.command
+
+    @property
+    def exit_code(self) -> int:
+        return self.final_step.result.exit_code
+
+    @property
+    def timed_out(self) -> bool:
+        return self.final_step.result.timed_out
+
+    @property
+    def stdout(self) -> str:
+        return self.final_step.result.stdout
+
+    @property
+    def stderr(self) -> str:
+        return self.final_step.result.stderr
 
 
 def _load_config_or_exit(env_file: Path | None):
@@ -162,6 +212,27 @@ def _print_trace(mode: str, repository_context, config) -> None:
     for index, step in enumerate(steps, start=1):
         typer.echo(f"{index}. {step}")
     typer.echo("")
+
+
+def _print_code_trace(message: str, enabled: bool) -> None:
+    if enabled:
+        typer.echo(f"Code trace: {message}")
+
+
+def _trace_validation_result(result: ValidationResult | None, enabled: bool) -> None:
+    if not enabled:
+        return
+    if result is None:
+        _print_code_trace("Validation skipped.", enabled)
+    elif result.passed:
+        _print_code_trace("Validation passed.", enabled)
+    elif result.timed_out:
+        _print_code_trace("Validation timed out.", enabled)
+    else:
+        _print_code_trace(
+            f"Validation failed with exit code {result.exit_code}.",
+            enabled,
+        )
 
 
 def _print_model_response(
@@ -379,22 +450,33 @@ def code(
         "--dry-run",
         help="Print the proposed patch without applying it.",
     ),
+    trace: bool = typer.Option(
+        False,
+        "--trace",
+        help="Print the high-level agent execution timeline.",
+    ),
 ) -> None:
     """Apply a focused code change and validate it."""
     config = _load_config_or_exit(env_file)
     user_prompt, repository_context = _build_user_prompt_with_context(
         "Change request", task
     )
-    response = _complete_with_config(CODE_SYSTEM_PROMPT, user_prompt, config)
-    usage = _usage_summary(response, config, CODE_SYSTEM_PROMPT, user_prompt)
+    if trace:
+        _print_trace("code", repository_context, config)
+    active_system_prompt = CODE_SYSTEM_PROMPT
+    active_user_prompt = user_prompt
+    response = _complete_with_config(active_system_prompt, active_user_prompt, config)
+    _print_code_trace("Model response received.", trace)
+    usage = _usage_summary(response, config, active_system_prompt, active_user_prompt)
 
     try:
         diff_text = extract_unified_diff(response.content)
     except DiffExtractionError as exc:
         if is_no_change_response(response.content):
+            _print_code_trace("Model indicated no changes.", trace)
             typer.echo("No changes applied.")
             typer.echo(response.content)
-            _print_usage(response, config, CODE_SYSTEM_PROMPT, user_prompt)
+            _print_usage(response, config, active_system_prompt, active_user_prompt)
             _record_memory(
                 mode="code",
                 task=task,
@@ -404,6 +486,7 @@ def code(
                 usage=usage,
             )
             return
+        _print_code_trace("Diff extraction failed.", trace)
         typer.secho(f"Could not find a patch: {exc}", fg=typer.colors.RED, err=True)
         typer.echo(response.content)
         _record_memory(
@@ -416,15 +499,47 @@ def code(
         )
         raise typer.Exit(code=1) from exc
 
+    _print_code_trace("Extracted unified diff.", trace)
     diff_summary = summarize_unified_diff(diff_text)
     patch_summary = diff_summary_to_dicts(diff_summary)
+    if not diff_summary_has_changes(diff_summary):
+        _print_code_trace("Empty patch rejected.", trace)
+        previous_empty_diff = diff_text
+        retry_response, retry_diff_text, retry_diff_summary, retry_prompt = (
+            _retry_after_empty_patch(
+                task=task,
+                user_prompt=user_prompt,
+                previous_diff=previous_empty_diff,
+                config=config,
+                trace=trace,
+                selected_files=repository_context.decision.selected_files,
+                usage=usage,
+                patch_summary=patch_summary,
+            )
+        )
+        response = retry_response
+        diff_text = retry_diff_text
+        diff_summary = retry_diff_summary
+        active_system_prompt = FIX_EMPTY_PATCH_SYSTEM_PROMPT
+        active_user_prompt = retry_prompt
+        usage = _usage_summary(
+            response, config, active_system_prompt, active_user_prompt
+        )
+        patch_summary = diff_summary_to_dicts(diff_summary)
+    _print_code_trace(
+        f"Patch summary prepared for {len(patch_summary)} file(s).", trace
+    )
     if dry_run:
+        _print_code_trace(
+            "Dry run selected; patch application and validation skipped.",
+            trace,
+        )
         typer.echo("Dry run: no files changed.")
         _print_patch_summary(diff_summary)
         typer.echo("")
         typer.echo("Proposed patch:")
         typer.echo(diff_text)
-        _print_usage(response, config, CODE_SYSTEM_PROMPT, user_prompt)
+        _print_usage(response, config, active_system_prompt, active_user_prompt)
         _record_memory(
             mode="code",
             task=task,
@@ -439,6 +554,7 @@ def code(
     try:
         patch_result = apply_unified_diff(Path.cwd(), diff_text)
     except PatchApplyError as exc:
+        _print_code_trace("Patch application failed.", trace)
         typer.secho(f"Patch failed: {exc}", fg=typer.colors.RED, err=True)
         _record_memory(
             mode="code",
@@ -451,6 +567,10 @@ def code(
         )
         raise typer.Exit(code=1) from exc
 
+    _print_code_trace(
+        f"Applied patch to {', '.join(patch_result.changed_files)}.",
+        trace,
+    )
     typer.echo("Applied patch.")
     typer.echo("Changed files:")
     for changed_file in patch_result.changed_files:
@@ -458,15 +578,18 @@ def code(
     _print_patch_summary(diff_summary)
 
     validation_result = _run_validation(config)
+    _trace_validation_result(validation_result, trace)
     if not _print_validation_result(validation_result, exit_on_failure=False):
+        _print_code_trace("Starting validation-fix retry.", trace)
         _retry_after_validation_failure(
             task=task,
             changed_files=patch_result.changed_files,
             validation_result=validation_result,
             config=config,
+            trace=trace,
         )
 
-    _print_usage(response, config, CODE_SYSTEM_PROMPT, user_prompt)
+    _print_usage(response, config, active_system_prompt, active_user_prompt)
     _record_memory(
         mode="code",
         task=task,
@@ -606,6 +729,19 @@ def _run_code_eval(
     try:
         diff_text = extract_unified_diff(initial_response.content)
         diff_summary = summarize_unified_diff(diff_text)
+        if not diff_summary_has_changes(diff_summary):
+            return _base_eval_result(
+                spec=spec,
+                config=config,
+                success=False,
+                status="empty_patch",
+                response=initial_response.content,
+                selected_files=selected_files,
+                changed_files=changed_files,
+                patch_summary=diff_summary,
+                model_calls=model_calls,
+                error="Model returned a diff with no file content changes.",
+            )
         patch_result = apply_unified_diff(Path.cwd(), diff_text)
         changed_files.extend(patch_result.changed_files)
     except DiffExtractionError:
@@ -686,7 +822,7 @@ def _run_eval_retry(
     spec: EvalSpec,
     config,
     changed_files: list[str],
-    validation_result: CommandResult,
+    validation_result: ValidationResult,
     model_calls: list[dict],
 ) -> dict:
     retry_prompt = _build_validation_retry_prompt(
@@ -721,6 +857,18 @@ def _run_eval_retry(
     try:
         retry_diff_text = extract_unified_diff(retry_response.content)
         retry_diff_summary = summarize_unified_diff(retry_diff_text)
+        if not diff_summary_has_changes(retry_diff_summary):
+            return {
+                "success": False,
+                "status": "retry_empty_patch",
+                "changed_files": [],
+                "validation": validation_result,
+                "retry": {
+                    "response": retry_response.content,
+                    "patch_summary": diff_summary_to_dicts(retry_diff_summary),
+                    "error": "Model returned a diff with no file content changes.",
+                },
+            }
         retry_patch_result = apply_unified_diff(Path.cwd(), retry_diff_text)
     except (DiffExtractionError, PatchApplyError) as exc:
         return {
@@ -752,15 +900,22 @@ def _run_eval_retry(
     }
 
 
-def _validation_for_eval(config) -> CommandResult | None:
+def _validation_for_eval(config) -> ValidationResult | None:
     try:
         return _run_validation_command(config)
     except CommandRunError as exc:
-        return CommandResult(
-            command=[],
-            exit_code=1,
-            stdout="",
-            stderr=str(exc),
+        return ValidationResult(
+            steps=[
+                ValidationStepResult(
+                    label="validation",
+                    result=CommandResult(
+                        command=[],
+                        exit_code=1,
+                        stdout="",
+                        stderr=str(exc),
+                    ),
+                )
+            ]
         )
 
 
@@ -795,7 +950,7 @@ def _base_eval_result(
     selected_files: list[str] | None = None,
     changed_files: list[str] | None = None,
     patch_summary: list | None = None,
-    validation: CommandResult | None = None,
+    validation: ValidationResult | None = None,
     retry: dict | None = None,
     error: str | None = None,
 ) -> dict:
@@ -829,7 +984,7 @@ def _print_patch_summary(summary) -> None:
     typer.echo(format_diff_summary(summary))
 
 
-def _validation_summary(result: CommandResult | None) -> dict | None:
+def _validation_summary(result: ValidationResult | None) -> dict | None:
     if result is None:
         return None
 
@@ -840,10 +995,22 @@ def _validation_summary(result: CommandResult | None) -> dict | None:
         "timed_out": result.timed_out,
         "stdout": result.stdout,
         "stderr": result.stderr,
+        "steps": [
+            {
+                "label": step.label,
+                "command": step.result.command,
+                "exit_code": step.result.exit_code,
+                "passed": step.result.passed,
+                "timed_out": step.result.timed_out,
+                "stdout": step.result.stdout,
+                "stderr": step.result.stderr,
+            }
+            for step in result.steps
+        ],
     }
 
 
-def _run_validation(config) -> CommandResult | None:
+def _run_validation(config) -> ValidationResult | None:
     try:
         return _run_validation_command(config)
     except CommandRunError as exc:
@@ -851,22 +1018,141 @@ def _run_validation(config) -> CommandResult | None:
         raise typer.Exit(code=1) from exc
 
 
-def _run_validation_command(config) -> CommandResult | None:
-    if not config.validation_command:
+def _run_validation_command(config) -> ValidationResult | None:
+    validation_commands = _validation_commands(config)
+    if not validation_commands:
         return None
 
-    return run_command(
-        config.validation_command,
-        cwd=Path.cwd(),
-        timeout_seconds=config.validation_timeout_seconds,
+    steps = []
+    for label, command in validation_commands:
+        result = run_command(
+            command,
+            cwd=Path.cwd(),
+            timeout_seconds=config.validation_timeout_seconds,
+        )
+        steps.append(ValidationStepResult(label=label, result=result))
+        if not result.passed:
+            break
+
+    return ValidationResult(steps=steps)
+
+
+def _validation_commands(config) -> list[tuple[str, str]]:
+    if config.validation_command:
+        return [("validation", config.validation_command)]
+
+    commands = []
+    if config.test_command:
+        commands.append(("tests", config.test_command))
+    if config.lint_command:
+        commands.append(("lint", config.lint_command))
+    if config.format_command:
+        commands.append(("format", config.format_command))
+    return commands
+
+
+def _retry_after_empty_patch(
+    task: str,
+    user_prompt: str,
+    previous_diff: str,
+    config,
+    trace: bool,
+    selected_files: list[str],
+    usage: dict,
+    patch_summary: list[dict],
+):
+    typer.echo("")
+    typer.echo("Attempting one empty-patch retry.")
+    retry_prompt = _build_empty_patch_retry_prompt(task, user_prompt, previous_diff)
+    response = _complete_with_config(
+        FIX_EMPTY_PATCH_SYSTEM_PROMPT,
+        retry_prompt,
+        config,
+    )
+    _print_code_trace("Empty-patch retry model response received.", trace)
+
+    try:
+        diff_text = extract_unified_diff(response.content)
+    except DiffExtractionError as exc:
+        _print_code_trace("Empty-patch retry diff extraction failed.", trace)
+        retry_usage = _usage_summary(
+            response,
+            config,
+            FIX_EMPTY_PATCH_SYSTEM_PROMPT,
+            retry_prompt,
+        )
+        typer.secho(
+            f"Could not find a retry patch: {exc}",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        typer.echo(response.content)
+        _record_memory(
+            mode="code",
+            task=task,
+            selected_files=selected_files,
+            status="empty_patch_retry_diff_not_found",
+            success=False,
+            usage=retry_usage,
+            patch_summary=patch_summary,
+        )
+        raise typer.Exit(code=1) from exc
+
+    _print_code_trace("Extracted empty-patch retry diff.", trace)
+    diff_summary = summarize_unified_diff(diff_text)
+    if not diff_summary_has_changes(diff_summary):
+        _print_code_trace("Empty-patch retry returned empty patch.", trace)
+        retry_usage = _usage_summary(
+            response,
+            config,
+            FIX_EMPTY_PATCH_SYSTEM_PROMPT,
+            retry_prompt,
+        )
+        retry_patch_summary = diff_summary_to_dicts(diff_summary)
+        typer.secho(
+            "Empty patch: Retry also returned a diff with no file content changes.",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        _record_memory(
+            mode="code",
+            task=task,
+            selected_files=selected_files,
+            status="empty_patch",
+            success=False,
+            usage=retry_usage or usage,
+            patch_summary=retry_patch_summary or patch_summary,
+        )
+        raise typer.Exit(code=1)
+
+    _print_code_trace("Empty-patch retry produced a non-empty patch.", trace)
+    return response, diff_text, diff_summary, retry_prompt
+
+
+def _build_empty_patch_retry_prompt(
+    task: str,
+    user_prompt: str,
+    previous_diff: str,
+) -> str:
+    return (
+        f"{user_prompt}\n\n"
+        "The previous model response was rejected because it returned a unified "
+        "diff with zero additions and zero deletions. That diff would not change "
+        "any file.\n\n"
+        f"Original change request:\n{task}\n\n"
+        f"Rejected empty diff:\n```diff\n{previous_diff}\n```\n\n"
+        "Return one corrected unified diff only. The corrected diff must include "
+        "at least one added or removed content line. If the repository already "
+        "satisfies the request, explain that without returning a diff."
     )
 
 
 def _retry_after_validation_failure(
     task: str,
     changed_files: list[str],
-    validation_result: CommandResult | None,
+    validation_result: ValidationResult | None,
     config,
+    trace: bool = False,
 ) -> None:
     if validation_result is None:
         return
@@ -877,11 +1163,13 @@ def _retry_after_validation_failure(
         task, changed_files, validation_result
     )
     response = _complete_with_config(FIX_VALIDATION_SYSTEM_PROMPT, retry_prompt, config)
+    _print_code_trace("Retry model response received.", trace)
 
     try:
         diff_text = extract_unified_diff(response.content)
         patch_result = apply_unified_diff(Path.cwd(), diff_text)
     except DiffExtractionError as exc:
+        _print_code_trace("Retry diff extraction failed.", trace)
         typer.secho(
             f"Could not find a retry patch: {exc}",
             fg=typer.colors.RED,
@@ -890,22 +1178,28 @@ def _retry_after_validation_failure(
         typer.echo(response.content)
         raise typer.Exit(code=1) from exc
     except PatchApplyError as exc:
+        _print_code_trace("Retry patch application failed.", trace)
         typer.secho(f"Retry patch failed: {exc}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1) from exc
 
+    _print_code_trace(
+        f"Applied retry patch to {', '.join(patch_result.changed_files)}.",
+        trace,
+    )
     typer.echo("Applied retry patch.")
     typer.echo("Changed files:")
     for changed_file in patch_result.changed_files:
         typer.echo(f"- {changed_file}")
 
     retry_validation_result = _run_validation(config)
+    _trace_validation_result(retry_validation_result, trace)
     _print_validation_result(retry_validation_result, exit_on_failure=True)
 
 
 def _build_validation_retry_prompt(
     task: str,
     changed_files: list[str],
-    validation_result: CommandResult,
+    validation_result: ValidationResult,
 ) -> str:
     return (
         f"Original change request:\n{task}\n\n"
@@ -919,7 +1213,7 @@ def _build_validation_retry_prompt(
 
 
 def _print_validation_result(
-    result: CommandResult | None,
+    result: ValidationResult | None,
     exit_on_failure: bool = True,
 ) -> bool:
     if result is None:
@@ -927,26 +1221,30 @@ def _print_validation_result(
         typer.echo("Validation skipped: AGENT_ZERO_VALIDATION_COMMAND is not set.")
         return True
 
-    typer.echo("")
-    typer.echo(f"Validation command: {' '.join(result.command)}")
-    if result.passed:
-        typer.echo("Validation passed.")
-        return True
-
-    if result.timed_out:
-        typer.echo("Validation timed out.")
-    else:
-        typer.echo(f"Validation failed with exit code {result.exit_code}.")
-
-    if result.stdout:
+    for step in result.steps:
         typer.echo("")
-        typer.echo("Validation stdout:")
-        typer.echo(result.stdout)
-    if result.stderr:
-        typer.echo("")
-        typer.echo("Validation stderr:")
-        typer.echo(result.stderr)
+        typer.echo(f"Validation step: {step.label}")
+        typer.echo(f"Validation command: {' '.join(step.result.command)}")
+        if step.result.passed:
+            typer.echo("Validation passed.")
+            continue
 
-    if exit_on_failure:
-        raise typer.Exit(code=1)
-    return False
+        if step.result.timed_out:
+            typer.echo("Validation timed out.")
+        else:
+            typer.echo(f"Validation failed with exit code {step.result.exit_code}.")
+
+        if step.result.stdout:
+            typer.echo("")
+            typer.echo("Validation stdout:")
+            typer.echo(step.result.stdout)
+        if step.result.stderr:
+            typer.echo("")
+            typer.echo("Validation stderr:")
+            typer.echo(step.result.stderr)
+
+        if exit_on_failure:
+            raise typer.Exit(code=1)
+        return False
+
+    return True

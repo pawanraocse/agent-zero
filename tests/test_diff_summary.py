@@ -1,5 +1,6 @@
 from agent_zero.diff_summary import (
     FileDiffSummary,
+    diff_summary_has_changes,
     diff_summary_to_dicts,
     format_diff_summary,
     summarize_unified_diff,
@@ -44,3 +45,13 @@ def test_diff_summary_to_dicts():
     assert diff_summary_to_dicts(summaries) == [
         {"path": "README.md", "additions": 3, "deletions": 1}
     ]
+
+
+def test_diff_summary_has_changes_rejects_empty_file_diffs():
+    assert diff_summary_has_changes(
+        [FileDiffSummary(path="README.md", additions=1, deletions=0)]
+    )
+    assert not diff_summary_has_changes(
+        [FileDiffSummary(path="README.md", additions=0, deletions=0)]
+    )
+    assert not diff_summary_has_changes([])

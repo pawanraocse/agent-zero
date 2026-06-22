@@ -133,6 +133,32 @@ def test_decide_context_files_can_select_unclassified_domain_files():
     ]
 
 
+def test_decide_context_files_narrows_documentation_target_edits():
+    files = [
+        "README.md",
+        "agent_zero/context.py",
+        "agent_zero/tools/file_tools.py",
+        "docs/high-level-design.md",
+    ]
+    search_results = [
+        "README.md:1: Agent Zero",
+        "agent_zero/context.py:10: README note",
+        "agent_zero/tools/file_tools.py:20: note",
+        "docs/high-level-design.md:30: README",
+    ]
+
+    decision = decide_context_files(
+        files=files,
+        task="Add a short README note",
+        search_results=search_results,
+        max_snippets=6,
+    )
+
+    assert decision.target_files == ["README.md"]
+    assert decision.selected_files == ["README.md"]
+    assert "explicit target file" in decision.reasons["README.md"]
+
+
 def test_decide_context_files_uses_repo_index_concepts():
     files = [
         "agent_zero/model_client.py",

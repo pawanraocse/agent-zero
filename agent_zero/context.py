@@ -52,6 +52,7 @@ class ContextDecision:
     reasons: dict[str, list[str]]
     index_used: bool = False
     memory_used: bool = False
+    target_files: list[str] = field(default_factory=list)
     context_budget_tokens: int | None = None
     context_content_tokens: int = 0
     included_files: list[str] = field(default_factory=list)
@@ -207,6 +208,7 @@ def decide_context_files(
     search_paths = _paths_from_search_results(search_results)
     index_entries = index_entries_by_path(repo_index)
     memory_scores = memory_file_scores(memory_records or [], terms)
+    target_files = _explicit_target_files(task, files)
     scores: dict[str, int] = {}
     reasons: dict[str, list[str]] = {}
 
@@ -230,6 +232,7 @@ def decide_context_files(
         index_relationships(repo_index),
         files,
     )
+    _apply_target_file_boosts(scores, reasons, target_files)
     _apply_source_type_balance(scores, reasons, terms)
 
     if not scores or _looks_like_overview_question(task, terms):
@@ -239,7 +242,17 @@ def decide_context_files(
                 reasons.setdefault(path, []).append("overview prior")
 
     ranked_paths = sorted(scores, key=lambda path: (scores[path], path), reverse=True)
-    selected_files = _select_ranked_files(ranked_paths, terms, max_snippets, reasons)
+    selected_files = _select_ranked_files(
+        ranked_paths,
+        terms,
+        max_snippets,
+        reasons,
+        target_files=(
+            target_files
+            if _looks_like_documentation_target_edit(terms, target_files)
+            else []
+        ),
+    )
 
     return ContextDecision(
         query_terms=terms,
@@ -247,6 +260,7 @@ def decide_context_files(
         reasons={path: reasons[path] for path in selected_files},
         index_used=bool(repo_index),
         memory_used=bool(memory_records),
+        target_files=target_files,
     )
 
 
@@ -377,6 +391,16 @@ def _apply_memory_boosts(
         )
 
 
+def _apply_target_file_boosts(
+    scores: dict[str, int],
+    reasons: dict[str, list[str]],
+    target_files: list[str],
+) -> None:
+    for path in target_files:
+        scores[path] = scores.get(path, 0) + 40
+        reasons.setdefault(path, []).append("explicit target file")
+
+
 def _apply_source_type_balance(
     scores: dict[str, int],
     reasons: dict[str, list[str]],
@@ -410,7 +434,14 @@ def _select_ranked_files(
     terms: list[str],
     max_snippets: int,
     reasons: dict[str, list[str]],
+    target_files: list[str] | None = None,
 ) -> list[str]:
+    target_files = target_files or []
+    if target_files:
+        ranked_target_files = [path for path in ranked_paths if path in target_files]
+        if ranked_target_files:
+            return ranked_target_files[:max_snippets]
+
     if _wants_tests_or_validation(terms):
         return ranked_paths[:max_snippets]
 
@@ -446,6 +477,66 @@ def _select_ranked_files(
         selected.extend(bucket[: max_snippets - len(selected)])
 
     return selected
+
+
+def _explicit_target_files(task: str, files: list[str]) -> list[str]:
+    lowered = task.lower()
+    candidates = []
+    aliases = {
+        "readme": "README.md",
+        "readme.md": "README.md",
+        "requirements": "requirements.txt",
+        "requirements.txt": "requirements.txt",
+        "pyproject": "pyproject.toml",
+        "pyproject.toml": "pyproject.toml",
+        "hld": "docs/high-level-design.md",
+        "high level design": "docs/high-level-design.md",
+        "high-level-design": "docs/high-level-design.md",
+        "high-level-design.md": "docs/high-level-design.md",
+        ".env.example": ".env.example",
+        "env example": ".env.example",
+    }
+
+    file_set = set(files)
+    for alias, path in aliases.items():
+        if alias in lowered and path in file_set and path not in candidates:
+            candidates.append(path)
+
+    for path in files:
+        path_lower = path.lower()
+        name_lower = Path(path).name.lower()
+        if path_lower in lowered or name_lower in lowered:
+            if path not in candidates:
+                candidates.append(path)
+
+    return candidates
+
+
+def _looks_like_documentation_target_edit(
+    terms: list[str],
+    target_files: list[str],
+) -> bool:
+    if not target_files:
+        return False
+
+    edit_terms = {
+        "add",
+        "append",
+        "change",
+        "document",
+        "edit",
+        "note",
+        "remove",
+        "update",
+        "write",
+    }
+    if not (edit_terms & set(terms)):
+        return False
+
+    return all(
+        path == "README.md" or path.startswith("docs/") or path.endswith(".md")
+        for path in target_files
+    )
 
 
 def _has_direct_retrieval_reason(reasons: list[str]) -> bool:
@@ -510,6 +601,8 @@ def _format_context_decision(decision: ContextDecision) -> str:
         f"Repo index: {'used' if decision.index_used else 'not found'}",
         f"Learning memory: {'used' if decision.memory_used else 'not found'}",
     ]
+    if decision.target_files:
+        lines.append(f"Target files: {', '.join(decision.target_files)}")
     if decision.context_budget_tokens is not None:
         lines.append(f"Context budget: {decision.context_budget_tokens} tokens")
         lines.append(f"Selected content: ~{decision.context_content_tokens} tokens")

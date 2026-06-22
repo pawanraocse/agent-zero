@@ -43,6 +43,18 @@ class AgentConfig(BaseModel):
         default=None,
         alias="AGENT_ZERO_VALIDATION_COMMAND",
     )
+    test_command: str | None = Field(
+        default=None,
+        alias="AGENT_ZERO_TEST_COMMAND",
+    )
+    lint_command: str | None = Field(
+        default=None,
+        alias="AGENT_ZERO_LINT_COMMAND",
+    )
+    format_command: str | None = Field(
+        default=None,
+        alias="AGENT_ZERO_FORMAT_COMMAND",
+    )
     validation_timeout_seconds: float = Field(
         default=120.0,
         alias="AGENT_ZERO_VALIDATION_TIMEOUT_SECONDS",
@@ -84,6 +96,9 @@ def load_config(env_file: Path | None = None) -> AgentConfig:
         "AGENT_ZERO_VALIDATION_COMMAND": env_values.get(
             "AGENT_ZERO_VALIDATION_COMMAND"
         ),
+        "AGENT_ZERO_TEST_COMMAND": env_values.get("AGENT_ZERO_TEST_COMMAND"),
+        "AGENT_ZERO_LINT_COMMAND": env_values.get("AGENT_ZERO_LINT_COMMAND"),
+        "AGENT_ZERO_FORMAT_COMMAND": env_values.get("AGENT_ZERO_FORMAT_COMMAND"),
         "AGENT_ZERO_VALIDATION_TIMEOUT_SECONDS": env_values.get(
             "AGENT_ZERO_VALIDATION_TIMEOUT_SECONDS",
             "120.0",

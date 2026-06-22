@@ -606,6 +606,94 @@ Learning outcome:
 - Understand that retrieval has multiple evidence levels: selected file,
   search-result line, and included file content.
 
+### Milestone 20: Code Trace Output
+
+Goal: expose the write path from the CLI.
+
+Steps:
+
+1. Add `--trace` to `code`. Done.
+2. Print context/pre-model trace for code mode. Done.
+3. Print trace steps for model response, diff extraction, patch summary, dry run,
+   patch application, validation, and retry. Done.
+4. Keep normal code-mode output unchanged when `--trace` is not used. Done.
+
+Learning outcome:
+
+- Understand the full coding-agent loop: context, model, diff, patch,
+  validation, and retry.
+
+### Milestone 21: Documentation Target Narrowing
+
+Goal: make retrieval respect simple documentation edit intent.
+
+Steps:
+
+1. Detect explicit target files from the task text. Done.
+2. Boost explicit target files during scoring. Done.
+3. For documentation edit tasks, select the target document before supporting
+   implementation files. Done.
+4. Print detected target files in context debug output. Done.
+
+Learning outcome:
+
+- Understand that retrieval should adapt to the kind of task: broad explanation,
+  targeted edit, validation, or investigation.
+
+### Milestone 22: Layered Validation Commands
+
+Goal: split validation into clearer stages.
+
+Steps:
+
+1. Add `AGENT_ZERO_TEST_COMMAND`. Done.
+2. Add `AGENT_ZERO_LINT_COMMAND`. Done.
+3. Add `AGENT_ZERO_FORMAT_COMMAND`. Done.
+4. Run configured validation stages in test, lint, format order. Done.
+5. Stop at the first failed validation stage. Done.
+6. Keep `AGENT_ZERO_VALIDATION_COMMAND` backward compatible. Done.
+
+Learning outcome:
+
+- Understand that validation can provide more useful feedback when tests, lint,
+  and formatting are separate signals.
+
+### Milestone 23: Empty Patch Guardrail
+
+Goal: reject diffs that do not contain real file edits.
+
+Steps:
+
+1. Summarize model-generated diffs before dry-run or patch application. Done.
+2. Detect summaries with zero additions and zero deletions. Done.
+3. Stop `code` mode with a clear empty-patch error. Done.
+4. Apply the same guardrail to code evals. Done.
+
+Learning outcome:
+
+- Understand that parsing a diff is not enough. The agent also needs a semantic
+  sanity check that the diff would actually change the repository.
+
+### Milestone 24: Empty Patch Retry
+
+Goal: retry patch generation once after an empty diff.
+
+Steps:
+
+1. Detect an empty patch before dry-run or patch application. Done.
+2. Build a retry prompt with the original task, repository context, and
+   rejected empty diff. Done.
+3. Call the model once more for a corrected diff. Done.
+4. Continue the normal dry-run or patch-application flow when the retry patch is
+   non-empty. Done.
+5. Stop clearly if the retry also returns an empty patch or no patch. Done.
+
+Learning outcome:
+
+- Understand recovery loops. The agent can retry the failed stage with targeted
+  feedback instead of repeating context discovery or silently accepting a bad
+  patch.
+
 ## Suggested Implementation Order
 
 Build in this order:
@@ -634,6 +722,11 @@ Build in this order:
 22. Oversized symbol slicing.
 23. Method body slicing.
 24. Evidence boundary.
+25. Code trace output.
+26. Documentation target narrowing.
+27. Layered validation commands.
+28. Empty patch guardrail.
+29. Empty patch retry.
 
 Each step should leave the project runnable.
 

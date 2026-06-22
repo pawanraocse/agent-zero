@@ -47,6 +47,10 @@ def format_diff_summary(summaries: list[FileDiffSummary]) -> str:
     )
 
 
+def diff_summary_has_changes(summaries: list[FileDiffSummary]) -> bool:
+    return any(summary.additions > 0 or summary.deletions > 0 for summary in summaries)
+
+
 def diff_summary_to_dicts(
     summaries: list[FileDiffSummary],
 ) -> list[dict[str, int | str]]:

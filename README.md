@@ -245,12 +245,25 @@ machine and network restrictions.
 
 `code` mode can run a validation command after applying a patch.
 
-Recommended:
+Simple setup:
 
 ```bash
 AGENT_ZERO_VALIDATION_COMMAND=.venv/bin/python -m pytest
 AGENT_ZERO_VALIDATION_TIMEOUT_SECONDS=120
 ```
+
+Layered setup:
+
+```bash
+AGENT_ZERO_TEST_COMMAND=.venv/bin/python -m pytest
+AGENT_ZERO_LINT_COMMAND=.venv/bin/python -m ruff check .
+AGENT_ZERO_FORMAT_COMMAND=.venv/bin/python -m ruff format --check .
+AGENT_ZERO_VALIDATION_TIMEOUT_SECONDS=120
+```
+
+If `AGENT_ZERO_VALIDATION_COMMAND` is set, Agent Zero uses that single command.
+Otherwise it runs the configured test, lint, and format commands in that order,
+stopping at the first failure.
 
 When validation fails, Agent Zero sends the failure output back to the model and
 allows one corrective patch attempt.
@@ -512,6 +525,15 @@ Dry run behavior:
 8. It still prints token and cost information.
 
 This is useful when you want to separate patch generation from patch execution.
+
+Use `--trace` when you want to see the full code loop:
+
+```bash
+python -m agent_zero code "Add a short README note" --trace
+```
+
+Code trace output shows model response receipt, diff extraction, patch summary,
+patch application, validation result, and retry steps when validation fails.
 
 ### Eval Mode
 
@@ -978,6 +1000,95 @@ Learning outcome:
 - A selected file and an included file are not the same thing. Good agents make
   that boundary visible so answers do not overclaim from skipped context.
 
+### Milestone 20: Code Trace Output
+
+Goal: make the write path visible.
+
+Built:
+
+- `--trace` option for `code`.
+- Trace output for model response receipt, diff extraction, patch summary,
+  dry-run skip, patch application, validation result, and validation-fix retry.
+- Retry trace output for retry model response, retry patch application, and
+  retry validation.
+
+Learning outcome:
+
+- Coding agents are easier to debug when the edit loop is visible step by step,
+  especially around validation failures and retries.
+
+### Milestone 21: Documentation Target Narrowing
+
+Goal: avoid over-reading implementation files for simple documentation edits.
+
+Built:
+
+- Explicit target-file detection for requests that name files such as
+  `README.md`.
+- Strong target-file boost in context selection.
+- Documentation edit narrowing for requests such as `Add a short README note`.
+- `--show-context` output for detected target files.
+
+Learning outcome:
+
+- Retrieval should consider edit intent. A targeted documentation edit usually
+  needs the target document more than implementation context.
+
+### Milestone 22: Layered Validation Commands
+
+Goal: validate code changes in separate stages.
+
+Built:
+
+- `AGENT_ZERO_TEST_COMMAND`.
+- `AGENT_ZERO_LINT_COMMAND`.
+- `AGENT_ZERO_FORMAT_COMMAND`.
+- Sequential validation that runs tests, then lint, then format.
+- Stop-on-first-failure behavior.
+- Backward compatibility with `AGENT_ZERO_VALIDATION_COMMAND`.
+- Eval result JSON still includes the legacy validation summary plus detailed
+  validation steps.
+
+Learning outcome:
+
+- Validation is not one thing. Real coding agents often separate correctness,
+  linting, and formatting because each failure means something different.
+
+### Milestone 23: Empty Patch Guardrail
+
+Goal: reject model patches that look like diffs but contain no real edits.
+
+Built:
+
+- Detection for unified diffs with zero additions and zero deletions.
+- Clear `Empty patch` failure output in `code` mode.
+- Protection before both dry-run preview and patch application.
+- Eval protection for the same zero-change diff case.
+
+Learning outcome:
+
+- Diff extraction is only the first safety check. A coding agent should also
+  verify that the patch contains meaningful file content changes before it
+  previews, applies, validates, or records the edit as successful.
+
+### Milestone 24: Empty Patch Retry
+
+Goal: recover once when the model returns a zero-change diff.
+
+Built:
+
+- One retry when `code` mode receives an empty patch.
+- A focused retry prompt that includes the rejected diff and explains why it
+  failed.
+- Trace output for the empty-patch retry path.
+- Protection against retry responses that are still empty or contain no diff.
+
+Learning outcome:
+
+- A useful coding agent does not only fail safely. It can classify the failure,
+  give the model targeted feedback, and retry the exact failed stage without
+  rebuilding repository context from scratch.
+
 ## Design Principles
 
 Agent Zero follows a few rules:
@@ -1121,7 +1232,7 @@ Good next milestones:
 - More detailed patch summaries.
 - Provider-specific usage extraction for Bedrock gateway response variants.
 - Better relevance explanations in model answers.
-- Extend `--trace` to `code`, validation, and retry flows.
+- Separate trace verbosity levels.
 
 ## Final Thought
 

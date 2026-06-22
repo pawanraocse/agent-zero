@@ -817,6 +817,182 @@ def test_code_command_dry_run_prints_patch_without_changing_files(
     assert validation_calls == []
 
 
+def test_code_command_dry_run_trace_prints_code_steps(tmp_path, monkeypatch):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "AGENT_ZERO_BASE_URL=http://localhost:1234/v1",
+                "AGENT_ZERO_API_KEY=test-key",
+                "AGENT_ZERO_MODEL=test-model",
+                "AGENT_ZERO_VALIDATION_COMMAND=pytest",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    target = tmp_path / "hello.txt"
+    target.write_text("old\n", encoding="utf-8")
+    fake_client = FakeModelClient(
+        ModelResponse(
+            content="""diff --git a/hello.txt b/hello.txt
+--- a/hello.txt
++++ b/hello.txt
+@@ -1 +1 @@
+-old
++new
+"""
+        )
+    )
+    monkeypatch.setattr(cli, "create_model_client", lambda config: fake_client)
+    monkeypatch.chdir(tmp_path)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        [
+            "code",
+            "Change old to new",
+            "--dry-run",
+            "--trace",
+            "--env-file",
+            str(env_file),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "Agent trace:" in result.output
+    assert "12. Prepared code prompt and called model" in result.output
+    assert "Code trace: Model response received." in result.output
+    assert "Code trace: Extracted unified diff." in result.output
+    assert "Code trace: Patch summary prepared for 1 file(s)." in result.output
+    assert (
+        "Code trace: Dry run selected; patch application and validation skipped."
+        in result.output
+    )
+    assert target.read_text(encoding="utf-8") == "old\n"
+
+
+def test_code_command_rejects_empty_patch_in_dry_run(tmp_path, monkeypatch):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "AGENT_ZERO_BASE_URL=http://localhost:1234/v1",
+                "AGENT_ZERO_API_KEY=test-key",
+                "AGENT_ZERO_MODEL=test-model",
+                "AGENT_ZERO_VALIDATION_COMMAND=pytest",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    target = tmp_path / "hello.txt"
+    target.write_text("same\n", encoding="utf-8")
+    fake_client = FakeModelClient(
+        ModelResponse(
+            content="""diff --git a/hello.txt b/hello.txt
+--- a/hello.txt
++++ b/hello.txt
+@@ -1 +1 @@
+ same
+"""
+        )
+    )
+    monkeypatch.setattr(cli, "create_model_client", lambda config: fake_client)
+    monkeypatch.chdir(tmp_path)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        [
+            "code",
+            "Add a note",
+            "--dry-run",
+            "--trace",
+            "--env-file",
+            str(env_file),
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "Code trace: Empty patch rejected." in result.output
+    assert "Attempting one empty-patch retry." in result.output
+    assert "Code trace: Empty-patch retry returned empty patch." in result.output
+    assert "Empty patch: Retry also returned a diff with no file content changes." in (
+        result.output
+    )
+    assert "Dry run: no files changed." not in result.output
+    assert "Proposed patch:" not in result.output
+    assert target.read_text(encoding="utf-8") == "same\n"
+    assert len(fake_client.calls) == 2
+
+
+def test_code_command_retries_empty_patch_in_dry_run(tmp_path, monkeypatch):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "AGENT_ZERO_BASE_URL=http://localhost:1234/v1",
+                "AGENT_ZERO_API_KEY=test-key",
+                "AGENT_ZERO_MODEL=test-model",
+                "AGENT_ZERO_VALIDATION_COMMAND=pytest",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    target = tmp_path / "hello.txt"
+    target.write_text("old\n", encoding="utf-8")
+    fake_client = SequenceModelClient(
+        [
+            ModelResponse(
+                content="""diff --git a/hello.txt b/hello.txt
+--- a/hello.txt
++++ b/hello.txt
+@@ -1 +1 @@
+ old
+"""
+            ),
+            ModelResponse(
+                content="""diff --git a/hello.txt b/hello.txt
+--- a/hello.txt
++++ b/hello.txt
+@@ -1 +1 @@
+-old
++new
+"""
+            ),
+        ]
+    )
+    monkeypatch.setattr(cli, "create_model_client", lambda config: fake_client)
+    monkeypatch.chdir(tmp_path)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        [
+            "code",
+            "Change old to new",
+            "--dry-run",
+            "--trace",
+            "--env-file",
+            str(env_file),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "Code trace: Empty patch rejected." in result.output
+    assert "Attempting one empty-patch retry." in result.output
+    assert "Code trace: Empty-patch retry model response received." in result.output
+    assert "Code trace: Empty-patch retry produced a non-empty patch." in result.output
+    assert "Dry run: no files changed." in result.output
+    assert "Patch summary:" in result.output
+    assert "- hello.txt: +1 -1" in result.output
+    assert "Proposed patch:" in result.output
+    assert "+new" in result.output
+    assert target.read_text(encoding="utf-8") == "old\n"
+    assert len(fake_client.calls) == 2
+    assert "Rejected empty diff:" in fake_client.calls[1][1]
+
+
 def test_code_command_treats_no_change_response_as_success(tmp_path, monkeypatch):
     env_file = tmp_path / ".env"
     env_file.write_text(
@@ -961,6 +1137,117 @@ def test_code_command_runs_validation_success(tmp_path, monkeypatch):
     assert "Validation passed." in result.output
 
 
+def test_code_command_runs_layered_validation_commands(tmp_path, monkeypatch):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "AGENT_ZERO_BASE_URL=http://localhost:1234/v1",
+                "AGENT_ZERO_API_KEY=test-key",
+                "AGENT_ZERO_MODEL=test-model",
+                "AGENT_ZERO_TEST_COMMAND=pytest tests",
+                "AGENT_ZERO_LINT_COMMAND=ruff check .",
+                "AGENT_ZERO_FORMAT_COMMAND=ruff format --check .",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "hello.txt").write_text("old\n", encoding="utf-8")
+    fake_client = FakeModelClient(
+        ModelResponse(
+            content="""diff --git a/hello.txt b/hello.txt
+--- a/hello.txt
++++ b/hello.txt
+@@ -1 +1 @@
+-old
++new
+"""
+        )
+    )
+    commands = []
+
+    def fake_run_command(command, cwd, timeout_seconds):
+        commands.append(command)
+        return CommandResult(
+            command=command.split(),
+            exit_code=0,
+            stdout="passed\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(cli, "create_model_client", lambda config: fake_client)
+    monkeypatch.setattr(cli, "run_command", fake_run_command)
+    monkeypatch.chdir(tmp_path)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        ["code", "Change old to new", "--env-file", str(env_file)],
+    )
+
+    assert result.exit_code == 0
+    assert commands == [
+        "pytest tests",
+        "ruff check .",
+        "ruff format --check .",
+    ]
+    assert "Validation step: tests" in result.output
+    assert "Validation step: lint" in result.output
+    assert "Validation step: format" in result.output
+
+
+def test_code_command_trace_prints_patch_and_validation_steps(tmp_path, monkeypatch):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "AGENT_ZERO_BASE_URL=http://localhost:1234/v1",
+                "AGENT_ZERO_API_KEY=test-key",
+                "AGENT_ZERO_MODEL=test-model",
+                "AGENT_ZERO_VALIDATION_COMMAND=pytest",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "hello.txt").write_text("old\n", encoding="utf-8")
+    fake_client = FakeModelClient(
+        ModelResponse(
+            content="""diff --git a/hello.txt b/hello.txt
+--- a/hello.txt
++++ b/hello.txt
+@@ -1 +1 @@
+-old
++new
+"""
+        )
+    )
+    monkeypatch.setattr(cli, "create_model_client", lambda config: fake_client)
+    monkeypatch.setattr(
+        cli,
+        "run_command",
+        lambda command, cwd, timeout_seconds: CommandResult(
+            command=["pytest"],
+            exit_code=0,
+            stdout="passed\n",
+            stderr="",
+        ),
+    )
+    monkeypatch.chdir(tmp_path)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        ["code", "Change old to new", "--trace", "--env-file", str(env_file)],
+    )
+
+    assert result.exit_code == 0
+    assert "Code trace: Model response received." in result.output
+    assert "Code trace: Extracted unified diff." in result.output
+    assert "Code trace: Applied patch to hello.txt." in result.output
+    assert "Code trace: Validation passed." in result.output
+    assert (tmp_path / "hello.txt").read_text(encoding="utf-8") == "new\n"
+
+
 def test_code_command_reports_validation_failure(tmp_path, monkeypatch):
     env_file = tmp_path / ".env"
     env_file.write_text(
@@ -1077,11 +1364,14 @@ def test_code_command_retries_after_validation_failure(tmp_path, monkeypatch):
     runner = CliRunner()
     result = runner.invoke(
         app,
-        ["code", "Change old to good", "--env-file", str(env_file)],
+        ["code", "Change old to good", "--trace", "--env-file", str(env_file)],
     )
 
     assert result.exit_code == 0
     assert "Attempting one validation-fix retry." in result.output
+    assert "Code trace: Starting validation-fix retry." in result.output
+    assert "Code trace: Retry model response received." in result.output
+    assert "Code trace: Applied retry patch to hello.txt." in result.output
     assert "Applied retry patch." in result.output
     assert "Validation passed." in result.output
     assert (tmp_path / "hello.txt").read_text(encoding="utf-8") == "good\n"
