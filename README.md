@@ -361,6 +361,12 @@ What happens internally:
 8. It prints the answer.
 9. It prints token and cost information when available.
 
+Direct evidence wins during ranking. A file that matches the question through
+content search, path terms, index concepts, symbols, summaries, or learning
+memory is treated as primary context. A file discovered only through graph
+relationships, such as `imports` or `mentions`, is treated as supporting context
+and is included only when there is room.
+
 Use it for questions like:
 
 ```bash
@@ -386,7 +392,51 @@ Learning memory: used
 ```
 
 This is useful for checking whether the repo index or learning memory actually
-influenced retrieval.
+influenced retrieval. The text after each selected file is the reason Agent Zero
+considered that file relevant.
+
+Use `--context-budget` to control the approximate token budget for selected file
+contents:
+
+```bash
+python -m agent_zero ask "Explain Bedrock gateway" --show-context --context-budget 4000
+```
+
+The budget applies to file contents, not the lightweight file list or search
+hits. Agent Zero reads higher-ranked files first. If the budget runs out, lower
+ranked selected files are skipped from the content block and shown in
+`--show-context`.
+
+When a selected file is larger than the remaining budget, Agent Zero now prefers
+focused excerpts around matching query terms instead of blindly keeping the
+start of the file.
+
+Use `--trace` when you want to see the high-level agent loop:
+
+```bash
+python -m agent_zero ask "Explain Bedrock gateway" --trace
+```
+
+Example trace:
+
+```text
+Agent trace:
+1. Loaded config: provider=bedrock, model=anthropic.claude-haiku-4-5-20251001-v1:0
+2. Listed repository files: 24
+3. Searched repository text: 8 result(s)
+4. Loaded repo index: used
+5. Loaded learning memory: used
+6. Selected files: agent_zero/model_client.py, README.md, .env.example
+7. Included content files: agent_zero/model_client.py, README.md, .env.example
+8. Applied context budget: 8000 tokens, selected content ~4200 tokens
+9. Truncated files: (none)
+10. Focused excerpts: (none)
+11. Skipped file contents: (none)
+12. Prepared ask prompt and called model
+```
+
+`--show-context` explains why files were selected. `--trace` explains what the
+agent did in order.
 
 ### Plan Mode
 
@@ -411,6 +461,15 @@ code.
 
 ```bash
 python -m agent_zero plan "Add timeout handling for Bedrock" --show-context
+```
+
+You can also pass `--context-budget` to `plan` when you want to compare how a
+smaller or larger context changes the plan.
+
+`plan` also supports `--trace`:
+
+```bash
+python -m agent_zero plan "Add timeout handling for Bedrock" --trace
 ```
 
 ### Code Mode
@@ -794,6 +853,131 @@ Learning outcome:
 - Retrieval should be inspectable; otherwise it is hard to tell whether index or
   memory is helping.
 
+### Milestone 13: Context Budgeting
+
+Goal: control how much selected file content reaches the model.
+
+Built:
+
+- Default selected-content budget of about 8,000 tokens.
+- `--context-budget` option for `ask`.
+- `--context-budget` option for `plan`.
+- Budget-aware file reading that truncates high-ranked files and skips lower
+  ranked files when the budget is exhausted.
+- Debug output for budget, selected content size, truncated files, and skipped
+  files.
+
+Learning outcome:
+
+- Coding agents must solve two retrieval problems: which files matter, and how
+  much of those files can fit into the prompt.
+
+### Milestone 14: Agent Trace Output
+
+Goal: make the agent loop visible as a timeline.
+
+Built:
+
+- `--trace` option for `ask`.
+- `--trace` option for `plan`.
+- Trace output for config loading, file listing, search, index usage, memory
+  usage, selected files, context budgeting, truncation, skipped content, and
+  model call.
+
+Learning outcome:
+
+- A coding agent is easier to understand when every major step is visible from
+  the terminal.
+
+### Milestone 15: Focused Context Snippets
+
+Goal: make truncated context more useful.
+
+Built:
+
+- Focused text reader that keeps lines around query matches.
+- Context builder uses focused excerpts when a selected file is larger than the
+  remaining context budget.
+- Prompt labels focused excerpts clearly.
+- `--show-context` reports focused files.
+- `--trace` reports focused excerpts.
+
+Learning outcome:
+
+- Context quality is not only about choosing the right files. It is also about
+  choosing the right parts of those files.
+
+### Milestone 16: Symbol-Aware Context Snippets
+
+Goal: make Python snippets follow code structure.
+
+Built:
+
+- Python AST parsing for focused snippets.
+- Class/function range detection when query matches land inside Python symbols.
+- Symbol ranking that prefers names and headers matching the query.
+- Fallback to line-window excerpts for non-Python files or invalid Python.
+
+Learning outcome:
+
+- Code-aware compression is stronger than plain text compression because it
+  preserves complete classes and functions when possible.
+
+### Milestone 17: Oversized Symbol Slicing
+
+Goal: keep useful parts of large classes without sending the whole class.
+
+Built:
+
+- Slicing for Python classes that are larger than the remaining context budget.
+- Class header/docstring preservation.
+- Method ranking that prefers `__init__`, public methods, and methods whose
+  name or body matches the query.
+- Sliced snippet labels that show the original class line range and selected
+  method line ranges.
+
+Learning outcome:
+
+- Sometimes even the right symbol is too large. A coding agent needs a second
+  compression pass inside large classes and functions.
+
+### Milestone 18: Method Body Slicing
+
+Goal: keep the important lines inside oversized methods.
+
+Built:
+
+- Method slicing for oversized Python methods.
+- Signature preservation.
+- Important-line windows for payload creation, HTTP calls, response parsing,
+  request IDs, polling, returns, raises, status, content, tenant, model, and
+  timeout handling.
+- Method ranking that makes behavior methods such as `complete` and polling
+  more important than constructor setup when the budget is tight.
+
+Learning outcome:
+
+- Compression can happen inside a single method. Good coding-agent context keeps
+  the control-flow evidence, not just the first lines.
+
+### Milestone 19: Evidence Boundary
+
+Goal: separate relevance signals from inspectable evidence.
+
+Built:
+
+- Context prompt section that lists included content files.
+- Context prompt section that lists selected files whose contents were skipped.
+- `--show-context` output for included content files.
+- `--trace` output for included content files.
+- Prompt guidance that tells the model to use skipped files as relevance signals
+  only, unless search result lines contain the needed detail.
+
+Learning outcome:
+
+- A selected file and an included file are not the same thing. Good agents make
+  that boundary visible so answers do not overclaim from skipped context.
+
 ## Design Principles
 
 Agent Zero follows a few rules:
@@ -933,10 +1117,11 @@ This repository can support a practical blog series:
 
 Good next milestones:
 
-- Better context budgeting.
 - Separate validation commands for tests, lint, and formatting.
 - More detailed patch summaries.
 - Provider-specific usage extraction for Bedrock gateway response variants.
+- Better relevance explanations in model answers.
+- Extend `--trace` to `code`, validation, and retry flows.
 
 ## Final Thought
 

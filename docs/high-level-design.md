@@ -456,11 +456,14 @@ Steps:
 4. Boost files from similar successful past tasks during context selection. Done.
 5. Avoid treating every read-only selected file as useful. Done.
 6. Prefer implementation files over tests for non-test questions. Done.
+7. Keep relationship-only files behind direct matches during selection. Done.
 
 Learning outcome:
 
 - Understand the difference between answer caching and self-improving retrieval
   memory.
+- Understand that repository graph edges are supporting evidence, not a
+  replacement for direct relevance.
 
 ### Milestone 12: Context Debug Output
 
@@ -476,6 +479,132 @@ Steps:
 Learning outcome:
 
 - Understand how to debug whether index and learning memory affect retrieval.
+
+### Milestone 13: Context Budgeting
+
+Goal: make selected context size explicit and controllable.
+
+Steps:
+
+1. Add a default selected-content budget. Done.
+2. Add `--context-budget` to `ask`. Done.
+3. Add `--context-budget` to `plan`. Done.
+4. Truncate high-ranked files when they exceed the remaining budget. Done.
+5. Skip lower-ranked file contents when the budget is exhausted. Done.
+6. Print budget, selected content size, truncated files, and skipped files in
+   context debug output. Done.
+
+Learning outcome:
+
+- Understand that context selection has two layers: retrieval chooses relevant
+  files, and budgeting decides how much of those files reaches the model.
+
+### Milestone 14: Agent Trace Output
+
+Goal: expose the high-level agent loop from the CLI.
+
+Steps:
+
+1. Add `--trace` to `ask`. Done.
+2. Add `--trace` to `plan`. Done.
+3. Print config, file listing, search, index usage, memory usage, selected
+   files, budget, truncation, skipped content, and model-call preparation. Done.
+
+Learning outcome:
+
+- Understand the difference between retrieval debugging and execution tracing:
+  `--show-context` explains why files were selected, while `--trace` explains
+  what the agent did in order.
+
+### Milestone 15: Focused Context Snippets
+
+Goal: make budgeted file content more relevant.
+
+Steps:
+
+1. Add a focused text-file reader. Done.
+2. Find query-term matches inside selected files. Done.
+3. Keep nearby lines around those matches when the file must be truncated. Done.
+4. Label focused excerpts in the prompt. Done.
+5. Print focused files in context debug output and trace output. Done.
+
+Learning outcome:
+
+- Understand that context compression should preserve the evidence most likely
+  to answer the user's question.
+
+### Milestone 16: Symbol-Aware Context Snippets
+
+Goal: preserve code structure during context compression.
+
+Steps:
+
+1. Parse Python files with `ast` when focused snippets are needed. Done.
+2. Detect class, function, and async function ranges. Done.
+3. Prefer symbols whose name or header matches the query. Done.
+4. Fall back to line-window excerpts when symbol extraction is unavailable.
+   Done.
+
+Learning outcome:
+
+- Understand how coding agents can use language structure to send better
+  context without increasing token cost.
+
+### Milestone 17: Oversized Symbol Slicing
+
+Goal: compress large Python classes after they have been selected.
+
+Steps:
+
+1. Detect when a matched class is larger than the available snippet budget.
+   Done.
+2. Preserve the class header and docstring. Done.
+3. Rank direct child methods by query match, public API value, and constructor
+   value. Done.
+4. Include selected method chunks until the budget is exhausted. Done.
+5. Label sliced class and method line ranges in the prompt. Done.
+
+Learning outcome:
+
+- Understand that context compression can happen in layers: file selection,
+  symbol selection, and then method selection inside oversized symbols.
+
+### Milestone 18: Method Body Slicing
+
+Goal: preserve important control-flow lines inside oversized methods.
+
+Steps:
+
+1. Detect when a method chunk is too large for its slice budget. Done.
+2. Preserve the method signature. Done.
+3. Keep important windows around payloads, HTTP calls, response parsing,
+   request IDs, polling, return statements, raise statements, status, content,
+   tenant, model, and timeout lines. Done.
+4. Prefer behavior methods such as `complete` and polling over constructor
+   setup when budget is tight. Done.
+
+Learning outcome:
+
+- Understand that high-quality context compression can preserve behavior without
+  sending every line of a long method.
+
+### Milestone 19: Evidence Boundary
+
+Goal: make selected files and included file contents visibly different.
+
+Steps:
+
+1. Track files whose contents were included in the prompt. Done.
+2. Track selected files whose contents were skipped by the context budget. Done.
+3. Add an evidence boundary section to the repository prompt. Done.
+4. Print included content files in context debug output and trace output. Done.
+5. Instruct the model not to make detailed claims from skipped files unless
+   search result lines provide that detail. Done.
+
+Learning outcome:
+
+- Understand that retrieval has multiple evidence levels: selected file,
+  search-result line, and included file content.
 
 ## Suggested Implementation Order
 
@@ -498,6 +627,13 @@ Build in this order:
 15. Narrative repo index.
 16. Learning signals memory.
 17. Context debug output.
+18. Context budgeting.
+19. Agent trace output.
+20. Focused context snippets.
+21. Symbol-aware context snippets.
+22. Oversized symbol slicing.
+23. Method body slicing.
+24. Evidence boundary.
 
 Each step should leave the project runnable.
 

@@ -4,7 +4,7 @@ import os
 import typer
 
 from agent_zero.config import ConfigError, load_config
-from agent_zero.context import build_repository_context
+from agent_zero.context import DEFAULT_CONTEXT_BUDGET_TOKENS, build_repository_context
 from agent_zero.diff_parser import (
     DiffExtractionError,
     extract_unified_diff,
@@ -37,12 +37,16 @@ ASK_SYSTEM_PROMPT = """You are Agent Zero, a minimal coding-agent learning proje
 Answer questions using the provided repository context.
 Be clear about what the context does and does not show.
 Do not claim you edited files or ran validation.
-When useful, mention relevant file paths from the context."""
+When useful, mention relevant file paths from the context.
+Distinguish included file contents from selected files whose contents were skipped.
+Use skipped files as relevance signals only, unless search result lines show the needed detail."""
 
 PLAN_SYSTEM_PROMPT = """You are Agent Zero in plan mode.
 Inspect the provided repository context and produce a structured implementation plan.
 Do not edit files. Do not claim you ran validation.
 Prefer current code evidence over future-looking documentation when they conflict.
+Distinguish included file contents from selected files whose contents were skipped.
+Use skipped files as relevance signals only, unless search result lines show the needed detail.
 
 Return the plan with these sections:
 1. Summary
@@ -87,13 +91,29 @@ def _run_stub(mode: str, task: str, env_file: Path | None) -> None:
     typer.echo(f"Status: {mode} mode arrives in a later milestone.")
 
 
-def _build_user_prompt(task_label: str, task: str) -> str:
-    repository_context = build_repository_context(Path.cwd(), task)
+def _build_user_prompt(
+    task_label: str,
+    task: str,
+    context_budget_tokens: int = DEFAULT_CONTEXT_BUDGET_TOKENS,
+) -> str:
+    repository_context = build_repository_context(
+        Path.cwd(),
+        task,
+        context_budget_tokens=context_budget_tokens,
+    )
     return _prompt_from_context(task_label, task, repository_context)
 
 
-def _build_user_prompt_with_context(task_label: str, task: str):
-    repository_context = build_repository_context(Path.cwd(), task)
+def _build_user_prompt_with_context(
+    task_label: str,
+    task: str,
+    context_budget_tokens: int = DEFAULT_CONTEXT_BUDGET_TOKENS,
+):
+    repository_context = build_repository_context(
+        Path.cwd(),
+        task,
+        context_budget_tokens=context_budget_tokens,
+    )
     return _prompt_from_context(
         task_label, task, repository_context
     ), repository_context
@@ -109,6 +129,38 @@ def _prompt_from_context(task_label: str, task: str, repository_context) -> str:
 def _print_context_selection(repository_context) -> None:
     typer.echo("Context selection:")
     typer.echo(repository_context.decision.to_text())
+    typer.echo("")
+
+
+def _print_trace(mode: str, repository_context, config) -> None:
+    decision = repository_context.decision
+    selected_files = ", ".join(decision.selected_files) or "(none)"
+    included_files = ", ".join(decision.included_files) or "(none)"
+    truncated_files = ", ".join(decision.truncated_files) or "(none)"
+    focused_files = ", ".join(decision.focused_files) or "(none)"
+    skipped_files = ", ".join(decision.skipped_files) or "(none)"
+    steps = [
+        f"Loaded config: provider={config.provider}, model={config.model}",
+        f"Listed repository files: {len(repository_context.files)}",
+        f"Searched repository text: {len(repository_context.search_results)} result(s)",
+        f"Loaded repo index: {'used' if decision.index_used else 'not found'}",
+        f"Loaded learning memory: {'used' if decision.memory_used else 'not found'}",
+        f"Selected files: {selected_files}",
+        f"Included content files: {included_files}",
+        (
+            "Applied context budget: "
+            f"{decision.context_budget_tokens} tokens, "
+            f"selected content ~{decision.context_content_tokens} tokens"
+        ),
+        f"Truncated files: {truncated_files}",
+        f"Focused excerpts: {focused_files}",
+        f"Skipped file contents: {skipped_files}",
+        f"Prepared {mode} prompt and called model",
+    ]
+
+    typer.echo("Agent trace:")
+    for index, step in enumerate(steps, start=1):
+        typer.echo(f"{index}. {step}")
     typer.echo("")
 
 
@@ -187,16 +239,6 @@ def _record_memory(
     append_memory_record(Path.cwd(), record)
 
 
-def _complete_or_exit(
-    system_prompt: str,
-    user_prompt: str,
-    env_file: Path | None,
-):
-    config = _load_config_or_exit(env_file)
-    response = _complete_with_config(system_prompt, user_prompt, config)
-    return response, config
-
-
 def _complete_with_config(system_prompt: str, user_prompt: str, config):
     try:
         return _call_model(system_prompt, user_prompt, config)
@@ -223,14 +265,30 @@ def ask(
         "--show-context",
         help="Print context selection reasons before the model answer.",
     ),
+    context_budget: int = typer.Option(
+        DEFAULT_CONTEXT_BUDGET_TOKENS,
+        "--context-budget",
+        min=1,
+        help="Approximate token budget for selected file contents.",
+    ),
+    trace: bool = typer.Option(
+        False,
+        "--trace",
+        help="Print the high-level agent execution timeline.",
+    ),
 ) -> None:
     """Answer a repo-aware question without editing files."""
+    config = _load_config_or_exit(env_file)
     user_prompt, repository_context = _build_user_prompt_with_context(
-        "User question", task
+        "User question",
+        task,
+        context_budget_tokens=context_budget,
     )
     if show_context:
         _print_context_selection(repository_context)
-    response, config = _complete_or_exit(ASK_SYSTEM_PROMPT, user_prompt, env_file)
+    if trace:
+        _print_trace("ask", repository_context, config)
+    response = _complete_with_config(ASK_SYSTEM_PROMPT, user_prompt, config)
     _print_model_response(response, config, ASK_SYSTEM_PROMPT, user_prompt)
     _record_memory(
         mode="ask",
@@ -255,14 +313,30 @@ def plan(
         "--show-context",
         help="Print context selection reasons before the model plan.",
     ),
+    context_budget: int = typer.Option(
+        DEFAULT_CONTEXT_BUDGET_TOKENS,
+        "--context-budget",
+        min=1,
+        help="Approximate token budget for selected file contents.",
+    ),
+    trace: bool = typer.Option(
+        False,
+        "--trace",
+        help="Print the high-level agent execution timeline.",
+    ),
 ) -> None:
     """Inspect and produce an implementation plan."""
+    config = _load_config_or_exit(env_file)
     user_prompt, repository_context = _build_user_prompt_with_context(
-        "Change request", task
+        "Change request",
+        task,
+        context_budget_tokens=context_budget,
     )
     if show_context:
         _print_context_selection(repository_context)
-    response, config = _complete_or_exit(PLAN_SYSTEM_PROMPT, user_prompt, env_file)
+    if trace:
+        _print_trace("plan", repository_context, config)
+    response = _complete_with_config(PLAN_SYSTEM_PROMPT, user_prompt, config)
     _print_model_response(response, config, PLAN_SYSTEM_PROMPT, user_prompt)
     _record_memory(
         mode="plan",

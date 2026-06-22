@@ -69,8 +69,10 @@ def test_ask_command_calls_model_and_prints_response(tmp_path, monkeypatch):
     assert len(fake_client.calls) == 1
     system_prompt, user_prompt = fake_client.calls[0]
     assert system_prompt == cli.ASK_SYSTEM_PROMPT
+    assert "Distinguish included file contents" in system_prompt
     assert "User question:\nWhat does this project do?" in user_prompt
     assert "Repository context:" in user_prompt
+    assert "Evidence boundary:" in user_prompt
     assert "README.md" in user_prompt
 
 
@@ -109,6 +111,88 @@ def test_ask_command_show_context_prints_selection_reasons(tmp_path, monkeypatch
     assert "Repo index: not found" in result.output
     assert "Learning memory: not found" in result.output
     assert "- README.md: overview prior" in result.output
+    assert "ok" in result.output
+
+
+def test_ask_command_accepts_context_budget(tmp_path, monkeypatch):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "AGENT_ZERO_BASE_URL=http://localhost:1234/v1",
+                "AGENT_ZERO_API_KEY=test-key",
+                "AGENT_ZERO_MODEL=test-model",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "README.md").write_text("a" * 120, encoding="utf-8")
+    fake_client = FakeModelClient(ModelResponse(content="ok"))
+    monkeypatch.setattr(cli, "create_model_client", lambda config: fake_client)
+    monkeypatch.chdir(tmp_path)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        [
+            "ask",
+            "What does this project do?",
+            "--context-budget",
+            "10",
+            "--show-context",
+            "--env-file",
+            str(env_file),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "Context budget: 10 tokens" in result.output
+    assert "Selected content: ~10 tokens" in result.output
+    assert "Included content files: README.md" in result.output
+    assert "### README.md (truncated)" in fake_client.calls[0][1]
+
+
+def test_ask_command_trace_prints_agent_timeline(tmp_path, monkeypatch):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "AGENT_ZERO_BASE_URL=http://localhost:1234/v1",
+                "AGENT_ZERO_API_KEY=test-key",
+                "AGENT_ZERO_MODEL=test-model",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "README.md").write_text("# Agent Zero\n", encoding="utf-8")
+    fake_client = FakeModelClient(ModelResponse(content="ok"))
+    monkeypatch.setattr(cli, "create_model_client", lambda config: fake_client)
+    monkeypatch.chdir(tmp_path)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        [
+            "ask",
+            "What does this project do?",
+            "--trace",
+            "--env-file",
+            str(env_file),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "Agent trace:" in result.output
+    assert "1. Loaded config: provider=openai, model=test-model" in result.output
+    assert "2. Listed repository files: 1" in result.output
+    assert "3. Searched repository text:" in result.output
+    assert "4. Loaded repo index: not found" in result.output
+    assert "5. Loaded learning memory: not found" in result.output
+    assert "6. Selected files: README.md" in result.output
+    assert "7. Included content files: README.md" in result.output
+    assert "8. Applied context budget:" in result.output
+    assert "10. Focused excerpts: (none)" in result.output
+    assert "12. Prepared ask prompt and called model" in result.output
     assert "ok" in result.output
 
 
@@ -360,6 +444,42 @@ def test_plan_command_show_context_prints_selection_reasons(tmp_path, monkeypatc
     assert "Context selection:" in result.output
     assert "Query terms: add, readme, details" in result.output
     assert "- README.md:" in result.output
+    assert "1. Summary" in result.output
+
+
+def test_plan_command_trace_prints_agent_timeline(tmp_path, monkeypatch):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "AGENT_ZERO_BASE_URL=http://localhost:1234/v1",
+                "AGENT_ZERO_API_KEY=test-key",
+                "AGENT_ZERO_MODEL=test-model",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "README.md").write_text("# Agent Zero\n", encoding="utf-8")
+    fake_client = FakeModelClient(ModelResponse(content="1. Summary"))
+    monkeypatch.setattr(cli, "create_model_client", lambda config: fake_client)
+    monkeypatch.chdir(tmp_path)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        [
+            "plan",
+            "Add README details",
+            "--trace",
+            "--env-file",
+            str(env_file),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "Agent trace:" in result.output
+    assert "1. Loaded config: provider=openai, model=test-model" in result.output
+    assert "12. Prepared plan prompt and called model" in result.output
     assert "1. Summary" in result.output
 
 

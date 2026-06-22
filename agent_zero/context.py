@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from agent_zero.memory import load_memory, memory_file_scores
@@ -10,7 +10,7 @@ from agent_zero.repo_index import (
 from agent_zero.tools.file_tools import (
     FileSnippet,
     list_files,
-    read_text_file,
+    read_focused_text_file,
     search_text,
 )
 
@@ -21,6 +21,10 @@ OVERVIEW_PRIORS = {
     "pyproject.toml": 5,
     "requirements.txt": 4,
 }
+
+DEFAULT_CONTEXT_BUDGET_TOKENS = 8_000
+DEFAULT_FILE_CONTEXT_CHARS = 6_000
+CHARS_PER_TOKEN_ESTIMATE = 4
 
 STOP_WORDS = {
     "about",
@@ -48,6 +52,12 @@ class ContextDecision:
     reasons: dict[str, list[str]]
     index_used: bool = False
     memory_used: bool = False
+    context_budget_tokens: int | None = None
+    context_content_tokens: int = 0
+    included_files: list[str] = field(default_factory=list)
+    truncated_files: list[str] = field(default_factory=list)
+    focused_files: list[str] = field(default_factory=list)
+    skipped_files: list[str] = field(default_factory=list)
 
     def to_text(self) -> str:
         return _format_context_decision(self)
@@ -78,14 +88,23 @@ class RepositoryContext:
                 ]
             )
 
+        sections.extend(
+            [
+                "Evidence boundary:",
+                _format_evidence_boundary(self.decision),
+            ]
+        )
+
         if self.snippets:
             file_sections = []
             for snippet in self.snippets:
-                marker = " (truncated)" if snippet.truncated else ""
+                marker = _snippet_marker(snippet)
                 file_sections.append(
                     f"### {snippet.path}{marker}\n```text\n{snippet.content}\n```"
                 )
-            sections.extend(["Selected file contents:", "\n\n".join(file_sections)])
+            sections.extend(
+                ["Included selected file contents:", "\n\n".join(file_sections)]
+            )
 
         return "\n\n".join(sections)
 
@@ -95,8 +114,10 @@ def build_repository_context(
     task: str,
     max_files: int = 200,
     max_snippets: int = 6,
+    context_budget_tokens: int = DEFAULT_CONTEXT_BUDGET_TOKENS,
 ) -> RepositoryContext:
     """Build a small read-only context package for ask mode."""
+    root = root.resolve()
     files = list_files(root, max_files=max_files)
     search_results = search_text(root, task)
     repo_index = load_repo_index(root)
@@ -109,13 +130,23 @@ def build_repository_context(
         repo_index=repo_index,
         memory_records=memory_records,
     )
-    snippets = []
-
-    for relative_path in decision.selected_files:
-        try:
-            snippets.append(read_text_file(root, relative_path))
-        except (FileNotFoundError, OSError, ValueError):
-            continue
+    snippets, truncated_files, focused_files, skipped_files = _read_budgeted_snippets(
+        root=root,
+        selected_files=decision.selected_files,
+        query_terms=decision.query_terms,
+        context_budget_tokens=context_budget_tokens,
+    )
+    decision = replace(
+        decision,
+        context_budget_tokens=context_budget_tokens,
+        context_content_tokens=_estimate_tokens(
+            "\n".join(snippet.content for snippet in snippets)
+        ),
+        included_files=[snippet.path for snippet in snippets],
+        truncated_files=truncated_files,
+        focused_files=focused_files,
+        skipped_files=skipped_files,
+    )
 
     return RepositoryContext(
         root=root,
@@ -124,6 +155,44 @@ def build_repository_context(
         snippets=snippets,
         search_results=search_results,
     )
+
+
+def _read_budgeted_snippets(
+    root: Path,
+    selected_files: list[str],
+    query_terms: list[str],
+    context_budget_tokens: int,
+) -> tuple[list[FileSnippet], list[str], list[str], list[str]]:
+    snippets = []
+    truncated_files = []
+    focused_files = []
+    skipped_files = []
+    remaining_chars = max(0, context_budget_tokens * CHARS_PER_TOKEN_ESTIMATE)
+
+    for relative_path in selected_files:
+        if remaining_chars <= 0:
+            skipped_files.append(relative_path)
+            continue
+
+        max_chars = min(DEFAULT_FILE_CONTEXT_CHARS, remaining_chars)
+        try:
+            snippet = read_focused_text_file(
+                root,
+                relative_path,
+                query_terms=query_terms,
+                max_chars=max_chars,
+            )
+        except (FileNotFoundError, OSError, ValueError):
+            continue
+
+        snippets.append(snippet)
+        remaining_chars -= len(snippet.content)
+        if snippet.truncated:
+            truncated_files.append(snippet.path)
+        if snippet.focused:
+            focused_files.append(snippet.path)
+
+    return snippets, truncated_files, focused_files, skipped_files
 
 
 def decide_context_files(
@@ -155,7 +224,12 @@ def decide_context_files(
             reasons[path] = path_reasons
 
     _apply_memory_boosts(scores, reasons, memory_scores, files)
-    _apply_index_relationship_boosts(scores, reasons, index_relationships(repo_index))
+    _apply_index_relationship_boosts(
+        scores,
+        reasons,
+        index_relationships(repo_index),
+        files,
+    )
     _apply_source_type_balance(scores, reasons, terms)
 
     if not scores or _looks_like_overview_question(task, terms):
@@ -165,7 +239,7 @@ def decide_context_files(
                 reasons.setdefault(path, []).append("overview prior")
 
     ranked_paths = sorted(scores, key=lambda path: (scores[path], path), reverse=True)
-    selected_files = _select_ranked_files(ranked_paths, terms, max_snippets)
+    selected_files = _select_ranked_files(ranked_paths, terms, max_snippets, reasons)
 
     return ContextDecision(
         query_terms=terms,
@@ -257,23 +331,34 @@ def _apply_index_relationship_boosts(
     scores: dict[str, int],
     reasons: dict[str, list[str]],
     relationships: list[dict[str, str]],
+    files: list[str],
 ) -> None:
+    file_set = set(files)
     seeded_paths = {path for path, score in scores.items() if score > 0}
     for relationship in relationships:
         source = relationship["from"]
         target = relationship["to"]
         relationship_type = relationship["type"]
+        boost = _relationship_boost(relationship_type)
 
-        if source in seeded_paths and target not in seeded_paths:
-            scores[target] = scores.get(target, 0) + 3
+        if source in seeded_paths and target not in seeded_paths and target in file_set:
+            scores[target] = scores.get(target, 0) + boost
             reasons.setdefault(target, []).append(
-                f"index related via {relationship_type}: {source}"
+                f"index related via {relationship_type}: {source} +{boost}"
             )
-        if target in seeded_paths and source not in seeded_paths:
-            scores[source] = scores.get(source, 0) + 3
+        if target in seeded_paths and source not in seeded_paths and source in file_set:
+            scores[source] = scores.get(source, 0) + boost
             reasons.setdefault(source, []).append(
-                f"index related via {relationship_type}: {target}"
+                f"index related via {relationship_type}: {target} +{boost}"
             )
+
+
+def _relationship_boost(relationship_type: str) -> int:
+    return {
+        "imports": 2,
+        "tests": 2,
+        "mentions": 1,
+    }.get(relationship_type, 1)
 
 
 def _apply_memory_boosts(
@@ -301,7 +386,8 @@ def _apply_source_type_balance(
         return
 
     for path in list(scores):
-        if path.startswith("agent_zero/"):
+        has_direct_reason = _has_direct_retrieval_reason(reasons.get(path, []))
+        if path.startswith("agent_zero/") and has_direct_reason:
             scores[path] += 4
             reasons.setdefault(path, []).append("implementation file boost")
         elif path.startswith("tests/"):
@@ -323,18 +409,56 @@ def _select_ranked_files(
     ranked_paths: list[str],
     terms: list[str],
     max_snippets: int,
+    reasons: dict[str, list[str]],
 ) -> list[str]:
     if _wants_tests_or_validation(terms):
         return ranked_paths[:max_snippets]
 
-    non_test_paths = [path for path in ranked_paths if not path.startswith("tests/")]
-    test_paths = [path for path in ranked_paths if path.startswith("tests/")]
-    selected = non_test_paths[:max_snippets]
+    direct_non_tests = [
+        path
+        for path in ranked_paths
+        if not path.startswith("tests/")
+        and _has_direct_retrieval_reason(reasons.get(path, []))
+    ]
+    direct_tests = [
+        path
+        for path in ranked_paths
+        if path.startswith("tests/")
+        and _has_direct_retrieval_reason(reasons.get(path, []))
+    ]
+    related_non_tests = [
+        path
+        for path in ranked_paths
+        if not path.startswith("tests/")
+        and not _has_direct_retrieval_reason(reasons.get(path, []))
+    ]
+    related_tests = [
+        path
+        for path in ranked_paths
+        if path.startswith("tests/")
+        and not _has_direct_retrieval_reason(reasons.get(path, []))
+    ]
 
-    if len(selected) < max_snippets and test_paths:
-        selected.extend(test_paths[: max_snippets - len(selected)])
+    selected = direct_non_tests[:max_snippets]
+    for bucket in (direct_tests, related_non_tests, related_tests):
+        if len(selected) >= max_snippets:
+            break
+        selected.extend(bucket[: max_snippets - len(selected)])
 
     return selected
+
+
+def _has_direct_retrieval_reason(reasons: list[str]) -> bool:
+    return any(
+        reason == "content search hit"
+        or reason == "overview prior"
+        or reason.startswith("path ")
+        or reason.startswith("index concept")
+        or reason.startswith("index symbol")
+        or reason.startswith("index summary")
+        or reason.startswith("memory boost")
+        for reason in reasons
+    )
 
 
 def _file_priority(path: str) -> int:
@@ -386,10 +510,39 @@ def _format_context_decision(decision: ContextDecision) -> str:
         f"Repo index: {'used' if decision.index_used else 'not found'}",
         f"Learning memory: {'used' if decision.memory_used else 'not found'}",
     ]
+    if decision.context_budget_tokens is not None:
+        lines.append(f"Context budget: {decision.context_budget_tokens} tokens")
+        lines.append(f"Selected content: ~{decision.context_content_tokens} tokens")
+        if decision.included_files:
+            lines.append(
+                f"Included content files: {', '.join(decision.included_files)}"
+            )
+        if decision.truncated_files:
+            lines.append(f"Truncated files: {', '.join(decision.truncated_files)}")
+        if decision.focused_files:
+            lines.append(f"Focused files: {', '.join(decision.focused_files)}")
+        if decision.skipped_files:
+            lines.append(f"Skipped files: {', '.join(decision.skipped_files)}")
     for path in decision.selected_files:
         reason_text = "; ".join(decision.reasons.get(path, [])) or "selected"
         lines.append(f"- {path}: {reason_text}")
     return "\n".join(lines)
+
+
+def _format_evidence_boundary(decision: ContextDecision) -> str:
+    included = ", ".join(decision.included_files) or "(none)"
+    skipped = ", ".join(decision.skipped_files) or "(none)"
+    return "\n".join(
+        [
+            f"Included content files: {included}",
+            f"Selected but content skipped: {skipped}",
+            (
+                "Use included file contents for detailed claims. Treat skipped "
+                "files as relevance signals only unless their search result lines "
+                "show the needed detail."
+            ),
+        ]
+    )
 
 
 def _is_likely_text_context(path: str) -> bool:
@@ -398,7 +551,22 @@ def _is_likely_text_context(path: str) -> bool:
     )
 
 
+def _snippet_marker(snippet: FileSnippet) -> str:
+    if snippet.focused:
+        return " (focused excerpt)"
+    if snippet.truncated:
+        return " (truncated)"
+    return ""
+
+
 def _string_list(value) -> list[str]:
     if not isinstance(value, list):
         return []
     return [item.lower() for item in value if isinstance(item, str)]
+
+
+def _estimate_tokens(text: str) -> int:
+    if not text:
+        return 0
+
+    return max(1, round(len(text) / CHARS_PER_TOKEN_ESTIMATE))
