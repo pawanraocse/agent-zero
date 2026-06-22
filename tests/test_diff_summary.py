@@ -39,11 +39,69 @@ def test_format_diff_summary():
     assert format_diff_summary([]) == "(no file changes found)"
 
 
+def test_summarize_unified_diff_reports_changed_python_symbols(tmp_path):
+    target = tmp_path / "app.py"
+    target.write_text(
+        "\n".join(
+            [
+                "class Service:",
+                "    def run(self):",
+                '        value = "old"',
+                "        return value",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    summaries = summarize_unified_diff(
+        """diff --git a/app.py b/app.py
+--- a/app.py
++++ b/app.py
+@@ -3,2 +3,2 @@
+-        value = "old"
++        value = "new"
+         return value
+""",
+        root=tmp_path,
+    )
+
+    assert summaries == [
+        FileDiffSummary(
+            path="app.py",
+            additions=1,
+            deletions=1,
+            symbols=("Service.run",),
+        )
+    ]
+    assert format_diff_summary(summaries) == "- app.py: +1 -1 (Service.run)"
+
+
 def test_diff_summary_to_dicts():
     summaries = [FileDiffSummary(path="README.md", additions=3, deletions=1)]
 
     assert diff_summary_to_dicts(summaries) == [
         {"path": "README.md", "additions": 3, "deletions": 1}
+    ]
+
+
+def test_diff_summary_to_dicts_includes_symbols_when_present():
+    summaries = [
+        FileDiffSummary(
+            path="app.py",
+            additions=1,
+            deletions=1,
+            symbols=("Service.run",),
+        )
+    ]
+
+    assert diff_summary_to_dicts(summaries) == [
+        {
+            "path": "app.py",
+            "additions": 1,
+            "deletions": 1,
+            "symbols": ["Service.run"],
+        }
     ]
 
 

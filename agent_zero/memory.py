@@ -41,13 +41,74 @@ def append_memory_record(
     path = root / MEMORY_RELATIVE_PATH
     path.parent.mkdir(parents=True, exist_ok=True)
     records = load_memory(root)
-    records.append({"created_at": datetime.now(UTC).isoformat(), **record})
+    records = _compact_memory_records(
+        [*records, {"created_at": datetime.now(UTC).isoformat(), **record}]
+    )
     records = records[-max_records:]
     path.write_text(
         "\n".join(json.dumps(item, sort_keys=True) for item in records) + "\n",
         encoding="utf-8",
     )
     return path
+
+
+def _compact_memory_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    compacted: list[dict[str, Any]] = []
+    by_key: dict[tuple, int] = {}
+
+    for record in records:
+        key = _memory_compaction_key(record)
+        if key not in by_key:
+            record.setdefault("occurrences", 1)
+            by_key[key] = len(compacted)
+            compacted.append(record)
+            continue
+
+        existing = compacted[by_key[key]]
+        existing["occurrences"] = int(existing.get("occurrences", 1)) + int(
+            record.get("occurrences", 1)
+        )
+        existing["last_seen_at"] = record.get("created_at", existing.get("created_at"))
+        existing["reflection"] = _stronger_reflection(
+            existing.get("reflection"),
+            record.get("reflection"),
+        )
+        if record.get("usage") is not None:
+            existing["usage"] = record["usage"]
+
+    return compacted
+
+
+def _memory_compaction_key(record: dict[str, Any]) -> tuple:
+    return (
+        record.get("mode"),
+        tuple(_string_list(record.get("task_terms"))),
+        record.get("status"),
+        bool(record.get("success", False)),
+        tuple(_string_list(record.get("useful_files"))),
+        tuple(_string_list(record.get("changed_files"))),
+    )
+
+
+def _stronger_reflection(existing: Any, new: Any) -> Any:
+    if not isinstance(existing, dict):
+        return new
+    if not isinstance(new, dict):
+        return existing
+
+    if _confidence_rank(str(new.get("confidence", "low"))) > _confidence_rank(
+        str(existing.get("confidence", "low"))
+    ):
+        return new
+    return existing
+
+
+def _confidence_rank(confidence: str) -> int:
+    return {
+        "low": 0,
+        "medium": 1,
+        "high": 2,
+    }.get(confidence, 0)
 
 
 def memory_file_scores(
@@ -74,6 +135,30 @@ def memory_file_scores(
     return scores
 
 
+def build_reflection(record: dict[str, Any]) -> dict[str, Any]:
+    useful_files = _useful_paths(record)
+    task_terms_value = _string_list(record.get("task_terms"))
+    mode = str(record.get("mode", "unknown"))
+    status = str(record.get("status", "unknown"))
+    success = bool(record.get("success", False))
+
+    lesson = _reflection_lesson(
+        mode=mode,
+        status=status,
+        success=success,
+        useful_files=useful_files,
+        validation_passed=record.get("validation_passed"),
+    )
+    confidence = _reflection_confidence(record, useful_files)
+
+    return {
+        "lesson": lesson,
+        "task_terms": task_terms_value,
+        "useful_files": useful_files,
+        "confidence": confidence,
+    }
+
+
 def task_terms(task: str) -> list[str]:
     terms = []
     for term in _normalize(task).split():
@@ -89,6 +174,44 @@ def _useful_paths(record: dict[str, Any]) -> list[str]:
             if path not in paths:
                 paths.append(path)
     return paths
+
+
+def _reflection_lesson(
+    mode: str,
+    status: str,
+    success: bool,
+    useful_files: list[str],
+    validation_passed: Any,
+) -> str:
+    if not success:
+        return f"{mode} run ended with {status}; do not boost files from this run."
+
+    if mode == "code" and useful_files:
+        validation_text = (
+            " with validation passing" if validation_passed is True else ""
+        )
+        return (
+            f"{mode} run succeeded{validation_text}; future similar tasks may "
+            f"reuse changed files: {', '.join(useful_files)}."
+        )
+
+    if useful_files:
+        return (
+            f"{mode} run succeeded; future similar tasks may inspect useful "
+            f"files: {', '.join(useful_files)}."
+        )
+
+    return f"{mode} run succeeded, but no reusable file signal was recorded."
+
+
+def _reflection_confidence(record: dict[str, Any], useful_files: list[str]) -> str:
+    if not record.get("success", False):
+        return "low"
+    if record.get("validation_passed") is True:
+        return "high"
+    if useful_files:
+        return "medium"
+    return "low"
 
 
 def _string_list(value: Any) -> list[str]:

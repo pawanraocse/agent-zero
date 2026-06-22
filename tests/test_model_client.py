@@ -278,3 +278,100 @@ def test_bedrock_gateway_client_accepts_string_output(monkeypatch):
     response = client.complete("system", "user")
 
     assert response.content == "String output from the gateway."
+
+
+def test_bedrock_gateway_client_extracts_nested_anthropic_usage(monkeypatch):
+    class SubmitResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"id": "request-123"}
+
+    class PollResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "data": {
+                    "status": "completed",
+                    "content": [{"text": "Nested usage response."}],
+                    "usage": {
+                        "input_tokens": 12,
+                        "output_tokens": 8,
+                    },
+                }
+            }
+
+    class FakeHTTPClient:
+        def __init__(self, **kwargs):
+            pass
+
+        def post(self, url, headers, json):
+            return SubmitResponse()
+
+        def get(self, url, headers, params):
+            return PollResponse()
+
+    monkeypatch.setattr("agent_zero.model_client.httpx.Client", FakeHTTPClient)
+
+    config = AgentConfig(
+        AGENT_ZERO_PROVIDER="bedrock",
+        AGENT_ZERO_MODEL="anthropic.test-model",
+        AGENT_ZERO_BEDROCK_URL="https://bedrock.example.test/invoke",
+        AGENT_ZERO_BEDROCK_AUTH_HEADER="x-api-key: test-key",
+        AGENT_ZERO_BEDROCK_TENANT_ID="11221122",
+        AGENT_ZERO_BEDROCK_POLL_INTERVAL_SECONDS=0,
+    )
+
+    client = BedrockGatewayClient(config)
+    response = client.complete("system", "user")
+
+    assert response.content == "Nested usage response."
+    assert response.input_tokens == 12
+    assert response.output_tokens == 8
+    assert response.total_tokens == 20
+
+
+def test_bedrock_gateway_client_extracts_token_usage_aliases(monkeypatch):
+    class SubmitResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "status": "completed",
+                "completion": "Immediate response.",
+                "tokenUsage": {
+                    "prompt_tokens": "20",
+                    "completion_tokens": "7",
+                    "total_tokens": "27",
+                },
+            }
+
+    class FakeHTTPClient:
+        def __init__(self, **kwargs):
+            pass
+
+        def post(self, url, headers, json):
+            return SubmitResponse()
+
+    monkeypatch.setattr("agent_zero.model_client.httpx.Client", FakeHTTPClient)
+
+    config = AgentConfig(
+        AGENT_ZERO_PROVIDER="bedrock",
+        AGENT_ZERO_MODEL="anthropic.test-model",
+        AGENT_ZERO_BEDROCK_URL="https://bedrock.example.test/invoke",
+        AGENT_ZERO_BEDROCK_AUTH_HEADER="x-api-key: test-key",
+        AGENT_ZERO_BEDROCK_TENANT_ID="11221122",
+        AGENT_ZERO_BEDROCK_POLL_INTERVAL_SECONDS=0,
+    )
+
+    client = BedrockGatewayClient(config)
+    response = client.complete("system", "user")
+
+    assert response.content == "Immediate response."
+    assert response.input_tokens == 20
+    assert response.output_tokens == 7
+    assert response.total_tokens == 27

@@ -1,6 +1,7 @@
 from pathlib import Path
 import os
 from dataclasses import dataclass
+from typing import Literal
 
 import typer
 
@@ -18,7 +19,7 @@ from agent_zero.diff_summary import (
     summarize_unified_diff,
 )
 from agent_zero.evals import EvalSpec, EvalSpecError, load_eval_spec, write_eval_result
-from agent_zero.memory import append_memory_record, task_terms
+from agent_zero.memory import append_memory_record, build_reflection, task_terms
 from agent_zero.model_client import ModelClientError, create_model_client
 from agent_zero.repo_index import (
     build_repo_index,
@@ -35,11 +36,14 @@ app = typer.Typer(
     no_args_is_help=True,
 )
 
+TraceLevel = Literal["none", "basic", "debug"]
+
 ASK_SYSTEM_PROMPT = """You are Agent Zero, a minimal coding-agent learning project.
 Answer questions using the provided repository context.
 Be clear about what the context does and does not show.
 Do not claim you edited files or ran validation.
 When useful, mention relevant file paths from the context.
+Use the relevance guide to explain why files matter.
 Distinguish included file contents from selected files whose contents were skipped.
 Use skipped files as relevance signals only, unless search result lines show the needed detail."""
 
@@ -47,6 +51,7 @@ PLAN_SYSTEM_PROMPT = """You are Agent Zero in plan mode.
 Inspect the provided repository context and produce a structured implementation plan.
 Do not edit files. Do not claim you ran validation.
 Prefer current code evidence over future-looking documentation when they conflict.
+Use the relevance guide to explain why files matter.
 Distinguish included file contents from selected files whose contents were skipped.
 Use skipped files as relevance signals only, unless search result lines show the needed detail.
 
@@ -75,6 +80,12 @@ The previous response contained a unified diff, but it had zero additions and
 zero deletions, so it would not change the repository.
 Return one corrected unified diff only.
 If no repository change is actually needed, explain why without a diff."""
+
+FIX_PATCH_APPLICATION_SYSTEM_PROMPT = """You are Agent Zero fixing a patch that
+failed to apply. The previous response contained a non-empty unified diff, but
+the local patch engine rejected it because the file context did not match.
+Return one corrected unified diff only.
+Use the current file excerpts as the source of truth."""
 
 
 @dataclass(frozen=True)
@@ -182,7 +193,30 @@ def _print_context_selection(repository_context) -> None:
     typer.echo("")
 
 
-def _print_trace(mode: str, repository_context, config) -> None:
+def _resolve_trace_level(trace: bool, trace_level: str) -> TraceLevel:
+    if trace_level not in {"none", "basic", "debug"}:
+        typer.secho(
+            "Invalid trace level. Use one of: none, basic, debug.",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    if trace_level == "none" and trace:
+        return "basic"
+    return trace_level  # type: ignore[return-value]
+
+
+def _trace_enabled(trace_level: TraceLevel) -> bool:
+    return trace_level != "none"
+
+
+def _debug_trace_enabled(trace_level: TraceLevel) -> bool:
+    return trace_level == "debug"
+
+
+def _print_trace(
+    mode: str, repository_context, config, trace_level: TraceLevel
+) -> None:
     decision = repository_context.decision
     selected_files = ", ".join(decision.selected_files) or "(none)"
     included_files = ", ".join(decision.included_files) or "(none)"
@@ -213,25 +247,46 @@ def _print_trace(mode: str, repository_context, config) -> None:
         typer.echo(f"{index}. {step}")
     typer.echo("")
 
+    if _debug_trace_enabled(trace_level):
+        _print_debug_trace(repository_context)
 
-def _print_code_trace(message: str, enabled: bool) -> None:
-    if enabled:
+
+def _print_debug_trace(repository_context) -> None:
+    decision = repository_context.decision
+    typer.echo("Agent trace debug:")
+    typer.echo(f"- Query terms: {', '.join(decision.query_terms) or '(none)'}")
+    typer.echo(f"- Target files: {', '.join(decision.target_files) or '(none)'}")
+    typer.echo("- Selected file reasons:")
+    for path in decision.selected_files:
+        reason_text = "; ".join(decision.reasons.get(path, [])) or "selected"
+        typer.echo(f"  - {path}: {reason_text}")
+    typer.echo("- Included content sizes:")
+    for snippet in repository_context.snippets:
+        typer.echo(f"  - {snippet.path}: {len(snippet.content)} chars")
+    typer.echo("")
+
+
+def _print_code_trace(message: str, trace_level: TraceLevel) -> None:
+    if _trace_enabled(trace_level):
         typer.echo(f"Code trace: {message}")
 
 
-def _trace_validation_result(result: ValidationResult | None, enabled: bool) -> None:
-    if not enabled:
+def _trace_validation_result(
+    result: ValidationResult | None,
+    trace_level: TraceLevel,
+) -> None:
+    if not _trace_enabled(trace_level):
         return
     if result is None:
-        _print_code_trace("Validation skipped.", enabled)
+        _print_code_trace("Validation skipped.", trace_level)
     elif result.passed:
-        _print_code_trace("Validation passed.", enabled)
+        _print_code_trace("Validation passed.", trace_level)
     elif result.timed_out:
-        _print_code_trace("Validation timed out.", enabled)
+        _print_code_trace("Validation timed out.", trace_level)
     else:
         _print_code_trace(
             f"Validation failed with exit code {result.exit_code}.",
-            enabled,
+            trace_level,
         )
 
 
@@ -306,6 +361,7 @@ def _record_memory(
         record["patch_summary"] = patch_summary
     if validation_passed is not None:
         record["validation_passed"] = validation_passed
+    record["reflection"] = build_reflection(record)
 
     append_memory_record(Path.cwd(), record)
 
@@ -347,9 +403,15 @@ def ask(
         "--trace",
         help="Print the high-level agent execution timeline.",
     ),
+    trace_level: str = typer.Option(
+        "none",
+        "--trace-level",
+        help="Trace verbosity: none, basic, or debug.",
+    ),
 ) -> None:
     """Answer a repo-aware question without editing files."""
     config = _load_config_or_exit(env_file)
+    resolved_trace_level = _resolve_trace_level(trace, trace_level)
     user_prompt, repository_context = _build_user_prompt_with_context(
         "User question",
         task,
@@ -357,8 +419,8 @@ def ask(
     )
     if show_context:
         _print_context_selection(repository_context)
-    if trace:
-        _print_trace("ask", repository_context, config)
+    if _trace_enabled(resolved_trace_level):
+        _print_trace("ask", repository_context, config, resolved_trace_level)
     response = _complete_with_config(ASK_SYSTEM_PROMPT, user_prompt, config)
     _print_model_response(response, config, ASK_SYSTEM_PROMPT, user_prompt)
     _record_memory(
@@ -395,9 +457,15 @@ def plan(
         "--trace",
         help="Print the high-level agent execution timeline.",
     ),
+    trace_level: str = typer.Option(
+        "none",
+        "--trace-level",
+        help="Trace verbosity: none, basic, or debug.",
+    ),
 ) -> None:
     """Inspect and produce an implementation plan."""
     config = _load_config_or_exit(env_file)
+    resolved_trace_level = _resolve_trace_level(trace, trace_level)
     user_prompt, repository_context = _build_user_prompt_with_context(
         "Change request",
         task,
@@ -405,8 +473,8 @@ def plan(
     )
     if show_context:
         _print_context_selection(repository_context)
-    if trace:
-        _print_trace("plan", repository_context, config)
+    if _trace_enabled(resolved_trace_level):
+        _print_trace("plan", repository_context, config, resolved_trace_level)
     response = _complete_with_config(PLAN_SYSTEM_PROMPT, user_prompt, config)
     _print_model_response(response, config, PLAN_SYSTEM_PROMPT, user_prompt)
     _record_memory(
@@ -455,25 +523,31 @@ def code(
         "--trace",
         help="Print the high-level agent execution timeline.",
     ),
+    trace_level: str = typer.Option(
+        "none",
+        "--trace-level",
+        help="Trace verbosity: none, basic, or debug.",
+    ),
 ) -> None:
     """Apply a focused code change and validate it."""
     config = _load_config_or_exit(env_file)
+    resolved_trace_level = _resolve_trace_level(trace, trace_level)
     user_prompt, repository_context = _build_user_prompt_with_context(
         "Change request", task
     )
-    if trace:
-        _print_trace("code", repository_context, config)
+    if _trace_enabled(resolved_trace_level):
+        _print_trace("code", repository_context, config, resolved_trace_level)
     active_system_prompt = CODE_SYSTEM_PROMPT
     active_user_prompt = user_prompt
     response = _complete_with_config(active_system_prompt, active_user_prompt, config)
-    _print_code_trace("Model response received.", trace)
+    _print_code_trace("Model response received.", resolved_trace_level)
     usage = _usage_summary(response, config, active_system_prompt, active_user_prompt)
 
     try:
         diff_text = extract_unified_diff(response.content)
     except DiffExtractionError as exc:
         if is_no_change_response(response.content):
-            _print_code_trace("Model indicated no changes.", trace)
+            _print_code_trace("Model indicated no changes.", resolved_trace_level)
             typer.echo("No changes applied.")
             typer.echo(response.content)
             _print_usage(response, config, active_system_prompt, active_user_prompt)
@@ -486,7 +560,7 @@ def code(
                 usage=usage,
             )
             return
-        _print_code_trace("Diff extraction failed.", trace)
+        _print_code_trace("Diff extraction failed.", resolved_trace_level)
         typer.secho(f"Could not find a patch: {exc}", fg=typer.colors.RED, err=True)
         typer.echo(response.content)
         _record_memory(
@@ -499,11 +573,11 @@ def code(
         )
         raise typer.Exit(code=1) from exc
 
-    _print_code_trace("Extracted unified diff.", trace)
-    diff_summary = summarize_unified_diff(diff_text)
+    _print_code_trace("Extracted unified diff.", resolved_trace_level)
+    diff_summary = summarize_unified_diff(diff_text, root=Path.cwd())
     patch_summary = diff_summary_to_dicts(diff_summary)
     if not diff_summary_has_changes(diff_summary):
-        _print_code_trace("Empty patch rejected.", trace)
+        _print_code_trace("Empty patch rejected.", resolved_trace_level)
         previous_empty_diff = diff_text
         retry_response, retry_diff_text, retry_diff_summary, retry_prompt = (
             _retry_after_empty_patch(
@@ -511,7 +585,7 @@ def code(
                 user_prompt=user_prompt,
                 previous_diff=previous_empty_diff,
                 config=config,
-                trace=trace,
+                trace_level=resolved_trace_level,
                 selected_files=repository_context.decision.selected_files,
                 usage=usage,
                 patch_summary=patch_summary,
@@ -527,12 +601,13 @@ def code(
         )
         patch_summary = diff_summary_to_dicts(diff_summary)
     _print_code_trace(
-        f"Patch summary prepared for {len(patch_summary)} file(s).", trace
+        f"Patch summary prepared for {len(patch_summary)} file(s).",
+        resolved_trace_level,
     )
     if dry_run:
         _print_code_trace(
             "Dry run selected; patch application and validation skipped.",
-            trace,
+            resolved_trace_level,
         )
         typer.echo("Dry run: no files changed.")
         _print_patch_summary(diff_summary)
@@ -554,22 +629,38 @@ def code(
     try:
         patch_result = apply_unified_diff(Path.cwd(), diff_text)
     except PatchApplyError as exc:
-        _print_code_trace("Patch application failed.", trace)
-        typer.secho(f"Patch failed: {exc}", fg=typer.colors.RED, err=True)
-        _record_memory(
-            mode="code",
+        _print_code_trace("Patch application failed.", resolved_trace_level)
+        (
+            retry_response,
+            retry_diff_text,
+            retry_diff_summary,
+            retry_patch_result,
+            retry_prompt,
+        ) = _retry_after_patch_application_failure(
             task=task,
+            failed_diff=diff_text,
+            failure=str(exc),
+            failed_summary=diff_summary,
+            config=config,
+            trace_level=resolved_trace_level,
             selected_files=repository_context.decision.selected_files,
-            status="patch_failed",
-            success=False,
             usage=usage,
             patch_summary=patch_summary,
         )
-        raise typer.Exit(code=1) from exc
+        response = retry_response
+        diff_text = retry_diff_text
+        diff_summary = retry_diff_summary
+        patch_result = retry_patch_result
+        active_system_prompt = FIX_PATCH_APPLICATION_SYSTEM_PROMPT
+        active_user_prompt = retry_prompt
+        usage = _usage_summary(
+            response, config, active_system_prompt, active_user_prompt
+        )
+        patch_summary = diff_summary_to_dicts(diff_summary)
 
     _print_code_trace(
         f"Applied patch to {', '.join(patch_result.changed_files)}.",
-        trace,
+        resolved_trace_level,
     )
     typer.echo("Applied patch.")
     typer.echo("Changed files:")
@@ -578,15 +669,15 @@ def code(
     _print_patch_summary(diff_summary)
 
     validation_result = _run_validation(config)
-    _trace_validation_result(validation_result, trace)
+    _trace_validation_result(validation_result, resolved_trace_level)
     if not _print_validation_result(validation_result, exit_on_failure=False):
-        _print_code_trace("Starting validation-fix retry.", trace)
+        _print_code_trace("Starting validation-fix retry.", resolved_trace_level)
         _retry_after_validation_failure(
             task=task,
             changed_files=patch_result.changed_files,
             validation_result=validation_result,
             config=config,
-            trace=trace,
+            trace_level=resolved_trace_level,
         )
 
     _print_usage(response, config, active_system_prompt, active_user_prompt)
@@ -728,7 +819,7 @@ def _run_code_eval(
 
     try:
         diff_text = extract_unified_diff(initial_response.content)
-        diff_summary = summarize_unified_diff(diff_text)
+        diff_summary = summarize_unified_diff(diff_text, root=Path.cwd())
         if not diff_summary_has_changes(diff_summary):
             return _base_eval_result(
                 spec=spec,
@@ -856,7 +947,7 @@ def _run_eval_retry(
 
     try:
         retry_diff_text = extract_unified_diff(retry_response.content)
-        retry_diff_summary = summarize_unified_diff(retry_diff_text)
+        retry_diff_summary = summarize_unified_diff(retry_diff_text, root=Path.cwd())
         if not diff_summary_has_changes(retry_diff_summary):
             return {
                 "success": False,
@@ -1056,7 +1147,7 @@ def _retry_after_empty_patch(
     user_prompt: str,
     previous_diff: str,
     config,
-    trace: bool,
+    trace_level: TraceLevel,
     selected_files: list[str],
     usage: dict,
     patch_summary: list[dict],
@@ -1069,12 +1160,12 @@ def _retry_after_empty_patch(
         retry_prompt,
         config,
     )
-    _print_code_trace("Empty-patch retry model response received.", trace)
+    _print_code_trace("Empty-patch retry model response received.", trace_level)
 
     try:
         diff_text = extract_unified_diff(response.content)
     except DiffExtractionError as exc:
-        _print_code_trace("Empty-patch retry diff extraction failed.", trace)
+        _print_code_trace("Empty-patch retry diff extraction failed.", trace_level)
         retry_usage = _usage_summary(
             response,
             config,
@@ -1098,10 +1189,10 @@ def _retry_after_empty_patch(
         )
         raise typer.Exit(code=1) from exc
 
-    _print_code_trace("Extracted empty-patch retry diff.", trace)
-    diff_summary = summarize_unified_diff(diff_text)
+    _print_code_trace("Extracted empty-patch retry diff.", trace_level)
+    diff_summary = summarize_unified_diff(diff_text, root=Path.cwd())
     if not diff_summary_has_changes(diff_summary):
-        _print_code_trace("Empty-patch retry returned empty patch.", trace)
+        _print_code_trace("Empty-patch retry returned empty patch.", trace_level)
         retry_usage = _usage_summary(
             response,
             config,
@@ -1125,7 +1216,7 @@ def _retry_after_empty_patch(
         )
         raise typer.Exit(code=1)
 
-    _print_code_trace("Empty-patch retry produced a non-empty patch.", trace)
+    _print_code_trace("Empty-patch retry produced a non-empty patch.", trace_level)
     return response, diff_text, diff_summary, retry_prompt
 
 
@@ -1147,12 +1238,207 @@ def _build_empty_patch_retry_prompt(
     )
 
 
+def _retry_after_patch_application_failure(
+    task: str,
+    failed_diff: str,
+    failure: str,
+    failed_summary,
+    config,
+    trace_level: TraceLevel,
+    selected_files: list[str],
+    usage: dict,
+    patch_summary: list[dict],
+):
+    typer.echo("")
+    typer.echo("Attempting one patch-application retry.")
+    retry_prompt = _build_patch_application_retry_prompt(
+        task=task,
+        failed_diff=failed_diff,
+        failure=failure,
+        failed_summary=failed_summary,
+    )
+    response = _complete_with_config(
+        FIX_PATCH_APPLICATION_SYSTEM_PROMPT,
+        retry_prompt,
+        config,
+    )
+    _print_code_trace("Patch-application retry model response received.", trace_level)
+
+    try:
+        diff_text = extract_unified_diff(response.content)
+    except DiffExtractionError as exc:
+        _print_code_trace(
+            "Patch-application retry diff extraction failed.", trace_level
+        )
+        retry_usage = _usage_summary(
+            response,
+            config,
+            FIX_PATCH_APPLICATION_SYSTEM_PROMPT,
+            retry_prompt,
+        )
+        typer.secho(
+            f"Could not find a retry patch: {exc}",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        typer.echo(response.content)
+        _record_memory(
+            mode="code",
+            task=task,
+            selected_files=selected_files,
+            status="patch_retry_diff_not_found",
+            success=False,
+            usage=retry_usage,
+            patch_summary=patch_summary,
+        )
+        raise typer.Exit(code=1) from exc
+
+    _print_code_trace("Extracted patch-application retry diff.", trace_level)
+    diff_summary = summarize_unified_diff(diff_text, root=Path.cwd())
+    retry_patch_summary = diff_summary_to_dicts(diff_summary)
+    if not diff_summary_has_changes(diff_summary):
+        _print_code_trace("Patch-application retry returned empty patch.", trace_level)
+        retry_usage = _usage_summary(
+            response,
+            config,
+            FIX_PATCH_APPLICATION_SYSTEM_PROMPT,
+            retry_prompt,
+        )
+        typer.secho(
+            "Empty patch: Patch-application retry returned no file content changes.",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        _record_memory(
+            mode="code",
+            task=task,
+            selected_files=selected_files,
+            status="patch_retry_empty_patch",
+            success=False,
+            usage=retry_usage or usage,
+            patch_summary=retry_patch_summary or patch_summary,
+        )
+        raise typer.Exit(code=1)
+
+    try:
+        patch_result = apply_unified_diff(Path.cwd(), diff_text)
+    except PatchApplyError as exc:
+        _print_code_trace("Patch-application retry failed.", trace_level)
+        retry_usage = _usage_summary(
+            response,
+            config,
+            FIX_PATCH_APPLICATION_SYSTEM_PROMPT,
+            retry_prompt,
+        )
+        typer.secho(f"Patch failed after retry: {exc}", fg=typer.colors.RED, err=True)
+        _record_memory(
+            mode="code",
+            task=task,
+            selected_files=selected_files,
+            status="patch_failed",
+            success=False,
+            usage=retry_usage or usage,
+            patch_summary=retry_patch_summary or patch_summary,
+        )
+        raise typer.Exit(code=1) from exc
+
+    _print_code_trace(
+        f"Patch-application retry applied patch to "
+        f"{', '.join(patch_result.changed_files)}.",
+        trace_level,
+    )
+    return response, diff_text, diff_summary, patch_result, retry_prompt
+
+
+def _build_patch_application_retry_prompt(
+    task: str,
+    failed_diff: str,
+    failure: str,
+    failed_summary,
+) -> str:
+    return (
+        f"Original change request:\n{task}\n\n"
+        f"Patch failure:\n{failure}\n\n"
+        f"Rejected diff:\n```diff\n{failed_diff}\n```\n\n"
+        "Current file excerpts:\n"
+        f"{_patch_retry_file_context(failed_summary, failed_diff)}\n\n"
+        "Return one corrected unified diff only. Use exact current file lines "
+        "from the excerpts when writing context lines. Do not include line "
+        "numbers in the diff."
+    )
+
+
+def _patch_retry_file_context(failed_summary, failed_diff: str) -> str:
+    needles = _diff_context_needles(failed_diff)
+    sections = []
+    for summary in failed_summary[:3]:
+        path = summary.path
+        if path == "/dev/null":
+            continue
+        file_path = Path.cwd() / path
+        if not file_path.exists():
+            sections.append(f"### {path}\n(file does not exist)")
+            continue
+
+        lines = file_path.read_text(encoding="utf-8", errors="replace").splitlines(
+            keepends=True
+        )
+        sections.append(f"### {path}\n{_line_numbered_windows(lines, needles)}")
+
+    return "\n\n".join(sections) or "(no current file context available)"
+
+
+def _diff_context_needles(diff_text: str) -> list[str]:
+    needles = []
+    for line in diff_text.splitlines():
+        if line[:1] not in {" ", "-"}:
+            continue
+        if line.startswith("--- "):
+            continue
+        needle = line[1:].strip()
+        if len(needle) >= 6 and needle not in needles:
+            needles.append(needle)
+    return needles
+
+
+def _line_numbered_windows(lines: list[str], needles: list[str]) -> str:
+    if len(lines) <= 160:
+        return _format_line_window(lines, 0, len(lines))
+
+    windows = []
+    for needle in needles:
+        for index, line in enumerate(lines):
+            if needle in line:
+                windows.append((max(index - 6, 0), min(index + 7, len(lines))))
+                break
+
+    windows.append((max(len(lines) - 60, 0), len(lines)))
+    merged = _merge_windows(windows)
+    return "\n---\n".join(
+        _format_line_window(lines, start, end) for start, end in merged
+    )
+
+
+def _merge_windows(windows: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    merged = []
+    for start, end in sorted(windows):
+        if not merged or start > merged[-1][1]:
+            merged.append((start, end))
+        else:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+    return merged
+
+
+def _format_line_window(lines: list[str], start: int, end: int) -> str:
+    return "".join(f"{index + 1}: {lines[index]}" for index in range(start, end))
+
+
 def _retry_after_validation_failure(
     task: str,
     changed_files: list[str],
     validation_result: ValidationResult | None,
     config,
-    trace: bool = False,
+    trace_level: TraceLevel = "none",
 ) -> None:
     if validation_result is None:
         return
@@ -1163,13 +1449,13 @@ def _retry_after_validation_failure(
         task, changed_files, validation_result
     )
     response = _complete_with_config(FIX_VALIDATION_SYSTEM_PROMPT, retry_prompt, config)
-    _print_code_trace("Retry model response received.", trace)
+    _print_code_trace("Retry model response received.", trace_level)
 
     try:
         diff_text = extract_unified_diff(response.content)
         patch_result = apply_unified_diff(Path.cwd(), diff_text)
     except DiffExtractionError as exc:
-        _print_code_trace("Retry diff extraction failed.", trace)
+        _print_code_trace("Retry diff extraction failed.", trace_level)
         typer.secho(
             f"Could not find a retry patch: {exc}",
             fg=typer.colors.RED,
@@ -1178,13 +1464,13 @@ def _retry_after_validation_failure(
         typer.echo(response.content)
         raise typer.Exit(code=1) from exc
     except PatchApplyError as exc:
-        _print_code_trace("Retry patch application failed.", trace)
+        _print_code_trace("Retry patch application failed.", trace_level)
         typer.secho(f"Retry patch failed: {exc}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1) from exc
 
     _print_code_trace(
         f"Applied retry patch to {', '.join(patch_result.changed_files)}.",
-        trace,
+        trace_level,
     )
     typer.echo("Applied retry patch.")
     typer.echo("Changed files:")
@@ -1192,7 +1478,7 @@ def _retry_after_validation_failure(
         typer.echo(f"- {changed_file}")
 
     retry_validation_result = _run_validation(config)
-    _trace_validation_result(retry_validation_result, trace)
+    _trace_validation_result(retry_validation_result, trace_level)
     _print_validation_result(retry_validation_result, exit_on_failure=True)
 
 

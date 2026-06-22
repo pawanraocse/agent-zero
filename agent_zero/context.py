@@ -93,6 +93,8 @@ class RepositoryContext:
             [
                 "Evidence boundary:",
                 _format_evidence_boundary(self.decision),
+                "Relevance guide:",
+                _format_relevance_guide(self.decision),
             ]
         )
 
@@ -636,6 +638,75 @@ def _format_evidence_boundary(decision: ContextDecision) -> str:
             ),
         ]
     )
+
+
+def _format_relevance_guide(decision: ContextDecision) -> str:
+    if not decision.selected_files:
+        return "(no relevance guide available)"
+
+    lines = []
+    for path in decision.selected_files:
+        evidence_level = _evidence_level(path, decision)
+        reason_text = _human_relevance_reason(decision.reasons.get(path, []))
+        lines.append(f"- {path}: {evidence_level}; {reason_text}")
+
+    lines.append(
+        "When answering, mention why a file is relevant only if that relevance is "
+        "supported by included content, search result lines, or the reasons above."
+    )
+    return "\n".join(lines)
+
+
+def _evidence_level(path: str, decision: ContextDecision) -> str:
+    if path in decision.included_files:
+        if path in decision.focused_files:
+            return "primary evidence from focused included content"
+        if path in decision.truncated_files:
+            return "primary evidence from truncated included content"
+        return "primary evidence from included content"
+    if path in decision.skipped_files:
+        return "relevance signal only because content was skipped"
+    return "supporting relevance signal"
+
+
+def _human_relevance_reason(reasons: list[str]) -> str:
+    if not reasons:
+        return "selected by repository context ranking"
+
+    readable = []
+    for reason in reasons:
+        readable.append(_humanize_relevance_reason(reason))
+    return "; ".join(readable)
+
+
+def _humanize_relevance_reason(reason: str) -> str:
+    if reason == "content search hit":
+        return "matched repository search results"
+    if reason == "overview prior":
+        return "likely project overview file"
+    if reason == "explicit target file":
+        return "explicitly named in the task"
+    if reason == "implementation file boost":
+        return "implementation file for a non-test question"
+    if reason == "test file penalty for non-test task":
+        return "test file included after implementation evidence"
+    if reason.startswith("path priority"):
+        return "path is usually useful for this project type"
+    if reason.startswith("path token matches:"):
+        return "path matches query terms: " + reason.split(":", 1)[1].strip()
+    if reason.startswith("path fuzzy matches:"):
+        return "path partially matches query terms: " + reason.split(":", 1)[1].strip()
+    if reason.startswith("index concept matches:"):
+        return "repo index concepts match: " + reason.split(":", 1)[1].strip()
+    if reason.startswith("index symbol matches:"):
+        return "repo index symbols match: " + reason.split(":", 1)[1].strip()
+    if reason.startswith("index summary matches:"):
+        return "repo index summary matches: " + reason.split(":", 1)[1].strip()
+    if reason.startswith("index related via"):
+        return "repo index relationship: " + reason.replace("index related via ", "")
+    if reason.startswith("memory boost"):
+        return "learning memory says this file helped similar tasks"
+    return reason
 
 
 def _is_likely_text_context(path: str) -> bool:

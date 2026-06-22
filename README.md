@@ -451,6 +451,19 @@ Agent trace:
 `--show-context` explains why files were selected. `--trace` explains what the
 agent did in order.
 
+For deeper debugging, use `--trace-level debug`:
+
+```bash
+python -m agent_zero ask "Explain Bedrock gateway" --trace-level debug
+```
+
+Trace levels:
+
+- `none`: no trace output.
+- `basic`: high-level steps. This is what `--trace` enables.
+- `debug`: high-level steps plus selected-file reasons and included content
+  sizes.
+
 ### Plan Mode
 
 Use `plan` before editing. It is read-only.
@@ -534,6 +547,9 @@ python -m agent_zero code "Add a short README note" --trace
 
 Code trace output shows model response receipt, diff extraction, patch summary,
 patch application, validation result, and retry steps when validation fails.
+
+`code` also supports `--trace-level debug` when you want the same detailed
+context diagnostics before patch generation.
 
 ### Eval Mode
 
@@ -811,6 +827,7 @@ Built:
 
 - Deterministic unified diff summary parser.
 - Per-file additions and deletions.
+- Changed Python symbols when they can be detected from the current file.
 - Patch summary output in normal `code` mode.
 - Patch summary output in `code --dry-run`.
 - Patch summary field in code eval result JSON.
@@ -847,6 +864,7 @@ Built:
 - Compact run records for `ask`, `plan`, `code`, and `eval`.
 - Memory cap to keep only recent records.
 - No full prompt, full answer, or file contents stored.
+- Deterministic reflection records that summarize the lesson from each run.
 - Context selection boost from similar successful past tasks.
 - Read-only runs do not automatically promote all selected files as useful.
 - Implementation files are favored over tests unless the task is test or
@@ -1089,6 +1107,131 @@ Learning outcome:
   give the model targeted feedback, and retry the exact failed stage without
   rebuilding repository context from scratch.
 
+### Milestone 25: Patch Application Retry
+
+Goal: recover once when a non-empty diff fails to apply.
+
+Built:
+
+- One retry when the patch engine reports a context mismatch.
+- A focused retry prompt containing the patch failure, rejected diff, and current
+  file excerpts.
+- Line-numbered excerpts around failed diff context plus the tail of large files.
+- Trace output for the patch-application retry path.
+
+Learning outcome:
+
+- A diff can be meaningful but still unusable if hunk line numbers or context
+  lines are stale. The agent should treat patch application as its own stage
+  with its own feedback loop.
+
+### Milestone 26: Symbol-Aware Patch Summaries
+
+Goal: make patch summaries explain where code changed, not only how much.
+
+Built:
+
+- Python AST-based symbol detection for changed functions, async functions, and
+  classes.
+- Patch summary output such as `agent_zero/cli.py: +4 -1 (code)`.
+- Eval result JSON includes `symbols` when changed symbols are detected.
+- Backward-compatible summaries for non-Python files.
+
+Learning outcome:
+
+- Summaries should help humans review agent edits quickly. File-level counts are
+  useful, but changed symbols make it easier to understand the behavioral area
+  touched by a patch.
+
+### Milestone 27: Bedrock Usage Extraction
+
+Goal: use real Bedrock gateway token counts when the gateway returns them.
+
+Built:
+
+- Usage extraction from nested gateway response shapes.
+- Support for Bedrock/Anthropic-style `input_tokens` and `output_tokens`.
+- Support for OpenAI-style `prompt_tokens` and `completion_tokens`.
+- Support for camelCase gateway fields such as `inputTokens`.
+- Numeric string token counts are normalized to integers.
+- Total tokens are inferred when input and output counts are present.
+
+Learning outcome:
+
+- Cost observability depends on provider-specific response handling. A coding
+  agent should use real usage data when available and clearly fall back to local
+  estimates only when usage is missing.
+
+### Milestone 28: Relevance Guide For Answers
+
+Goal: help model answers explain why selected files matter.
+
+Built:
+
+- A `Relevance guide` section in repository prompts.
+- Evidence labels for included, focused, truncated, and skipped files.
+- Human-readable relevance reasons derived from search, index, memory, and path
+  signals.
+- Ask and plan prompt instructions that tell the model to use the relevance
+  guide when discussing relevant files.
+
+Learning outcome:
+
+- Retrieval is more useful when the agent can explain why a file was selected
+  and how strong the evidence is. This reduces vague answers like "relevant
+  files are X, Y, Z" without showing the basis.
+
+### Milestone 29: Trace Verbosity Levels
+
+Goal: separate normal trace output from deeper debugging detail.
+
+Built:
+
+- `--trace-level none|basic|debug` for `ask`, `plan`, and `code`.
+- Backward compatibility: `--trace` still means basic trace.
+- Debug trace output for selected-file reasons and included content sizes.
+- Clear error output for invalid trace levels.
+
+Learning outcome:
+
+- Observability needs levels. A normal trace should explain the agent loop, while
+  debug trace should expose deeper retrieval diagnostics only when needed.
+
+### Milestone 30: Reflection Memory Records
+
+Goal: make memory more useful than raw run logs.
+
+Built:
+
+- A deterministic `reflection` object stored with each memory record.
+- Reflection lessons that explain whether a run produced reusable file signals.
+- Confidence labels: `low`, `medium`, or `high`.
+- Failed runs are explicitly marked as unsafe to boost from.
+- Code runs with passing validation become high-confidence learning signals.
+
+Learning outcome:
+
+- Self-learning should start with clean feedback records. Before embeddings or a
+  graph index, the agent needs compact lessons that separate successful,
+  reusable signals from noisy or failed runs.
+
+### Milestone 31: Memory Hygiene
+
+Goal: keep local learning memory compact and less noisy.
+
+Built:
+
+- Duplicate memory records are merged instead of appended forever.
+- Repeated lessons track an `occurrences` count.
+- Repeated records keep a `last_seen_at` timestamp.
+- Distinct useful or changed files stay as separate memory signals.
+- When duplicate reflections differ, the higher-confidence reflection wins.
+
+Learning outcome:
+
+- Persistent memory needs hygiene. Without merging and confidence handling,
+  self-learning systems quickly turn useful feedback into noisy logs.
+
 ## Design Principles
 
 Agent Zero follows a few rules:
@@ -1228,11 +1371,7 @@ This repository can support a practical blog series:
 
 Good next milestones:
 
-- Separate validation commands for tests, lint, and formatting.
-- More detailed patch summaries.
-- Provider-specific usage extraction for Bedrock gateway response variants.
-- Better relevance explanations in model answers.
-- Separate trace verbosity levels.
+- Semantic memory with embeddings or a graph index.
 
 ## Final Thought
 
@@ -1241,3 +1380,5 @@ Agent Zero is small on purpose.
 The goal is not to hide the agent loop behind abstractions. The goal is to make
 the loop visible enough that you can point at every step and say: I know what
 the agent is doing, why it is doing it, and how to improve it.
+
+Validation supports tests, lint, and format checks.

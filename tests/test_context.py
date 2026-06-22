@@ -17,6 +17,11 @@ def test_build_repository_context_includes_overview_files(tmp_path):
     ]
     assert ".env" not in prompt
     assert "Context selection:" in prompt
+    assert "Relevance guide:" in prompt
+    assert (
+        "- README.md: primary evidence from included content; likely project overview file"
+        in prompt
+    )
     assert "overview prior" in prompt
 
 
@@ -41,6 +46,10 @@ def test_build_repository_context_applies_context_budget(tmp_path):
     assert "Selected content: ~10 tokens" in prompt
     assert "Included content files: README.md" in prompt
     assert "Selected but content skipped: pyproject.toml" in prompt
+    assert (
+        "- pyproject.toml: relevance signal only because content was skipped;" in prompt
+    )
+    assert "likely project overview file" in prompt
     assert "Truncated files: README.md" in prompt
     assert "Skipped files: pyproject.toml" in prompt
     assert "Included selected file contents:" in prompt
@@ -78,6 +87,10 @@ def test_build_repository_context_uses_focused_excerpts(tmp_path):
     assert "intro line that should be omitted" not in context.snippets[0].content
     assert "### README.md (focused excerpt)" in prompt
     assert "Focused files: README.md" in prompt
+    assert (
+        "- README.md: primary evidence from focused included content; "
+        "matched repository search results"
+    ) in prompt
 
 
 def test_decide_context_files_ranks_config_files_for_bedrock_questions():

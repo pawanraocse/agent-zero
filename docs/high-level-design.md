@@ -694,6 +694,132 @@ Learning outcome:
   feedback instead of repeating context discovery or silently accepting a bad
   patch.
 
+### Milestone 25: Patch Application Retry
+
+Goal: retry patch generation once after a context mismatch.
+
+Steps:
+
+1. Detect patch application failures separately from diff extraction failures.
+   Done.
+2. Build a retry prompt with the failed diff, patch error, and current file
+   excerpts. Done.
+3. Call the model once more for a corrected diff. Done.
+4. Apply the corrected diff and continue validation when it succeeds. Done.
+5. Stop clearly if the retry diff is missing, empty, or still cannot apply.
+   Done.
+
+Learning outcome:
+
+- Understand that patch application is a separate tool stage. A model can
+  produce a non-empty diff that is still invalid against the current checkout,
+  so the agent needs targeted feedback at this boundary too.
+
+### Milestone 26: Symbol-Aware Patch Summaries
+
+Goal: include likely changed code symbols in patch summaries.
+
+Steps:
+
+1. Parse changed hunk line numbers from unified diffs. Done.
+2. For Python files, inspect the current file with `ast`. Done.
+3. Map changed lines to the nearest function, async function, or class. Done.
+4. Print detected symbols in human patch summaries. Done.
+5. Include detected symbols in eval JSON patch summaries. Done.
+
+Learning outcome:
+
+- Understand that observability improves when agent output moves from raw file
+  counts toward code-aware explanations.
+
+### Milestone 27: Bedrock Usage Extraction
+
+Goal: parse real token usage from Bedrock gateway response variants.
+
+Steps:
+
+1. Support direct `usage.inputTokens` and `usage.outputTokens`. Done.
+2. Support nested usage under gateway wrapper fields such as `data`. Done.
+3. Support Anthropic-style and OpenAI-style token names. Done.
+4. Normalize numeric string token counts. Done.
+5. Infer total tokens when input and output counts are available. Done.
+
+Learning outcome:
+
+- Understand that provider integrations need response normalization. Without
+  it, cost output may remain estimated even when the gateway already returned
+  exact token usage.
+
+### Milestone 28: Relevance Guide For Answers
+
+Goal: make selected-file relevance explainable to model answers.
+
+Steps:
+
+1. Add a relevance guide to repository prompts. Done.
+2. Label files by evidence level: included, focused, truncated, or skipped.
+   Done.
+3. Convert raw retrieval reasons into human-readable relevance reasons. Done.
+4. Update ask and plan prompts to use the guide when explaining relevant files.
+   Done.
+
+Learning outcome:
+
+- Understand that retrieval explanations need to be part of the model context,
+  not only debug output printed to the terminal.
+
+### Milestone 29: Trace Verbosity Levels
+
+Goal: split trace output into normal and debug levels.
+
+Steps:
+
+1. Add `--trace-level none|basic|debug` to `ask`, `plan`, and `code`. Done.
+2. Keep `--trace` backward compatible as basic trace. Done.
+3. Print deeper selected-file diagnostics in debug trace. Done.
+4. Reject invalid trace levels clearly. Done.
+
+Learning outcome:
+
+- Understand that observability should be layered. Normal users need a readable
+  execution timeline; builders need debug detail when retrieval or patching goes
+  sideways.
+
+### Milestone 30: Reflection Memory Records
+
+Goal: store compact lessons alongside raw memory records.
+
+Steps:
+
+1. Build deterministic reflection objects from run records. Done.
+2. Record lessons, reusable files, task terms, and confidence. Done.
+3. Mark failed runs as low-confidence signals that should not boost retrieval.
+   Done.
+4. Mark validated code runs as high-confidence learning signals. Done.
+
+Learning outcome:
+
+- Understand that useful agent memory needs reflection. A raw log says what
+  happened; a reflection says what should be learned from it.
+
+### Milestone 31: Memory Hygiene
+
+Goal: compact duplicate memory records.
+
+Steps:
+
+1. Define a deterministic compaction key from mode, task terms, status,
+   success, useful files, and changed files. Done.
+2. Merge duplicate records when appending memory. Done.
+3. Track repeated lessons with `occurrences` and `last_seen_at`. Done.
+4. Preserve distinct file signals as separate memory entries. Done.
+5. Keep the stronger reflection when duplicates differ in confidence. Done.
+
+Learning outcome:
+
+- Understand that persistent agent memory must be curated. Useful memory is not
+  just more records; it is compact, deduplicated, and confidence-aware.
+
 ## Suggested Implementation Order
 
 Build in this order:
@@ -727,6 +853,13 @@ Build in this order:
 27. Layered validation commands.
 28. Empty patch guardrail.
 29. Empty patch retry.
+30. Patch application retry.
+31. Symbol-aware patch summaries.
+32. Bedrock usage extraction.
+33. Relevance guide for answers.
+34. Trace verbosity levels.
+35. Reflection memory records.
+36. Memory hygiene.
 
 Each step should leave the project runnable.
 

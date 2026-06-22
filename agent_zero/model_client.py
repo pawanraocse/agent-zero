@@ -216,15 +216,133 @@ def _extract_status(data: dict[str, Any]) -> str | None:
 
 
 def _model_response_from_data(data: dict[str, Any], content: str) -> ModelResponse:
-    usage = data.get("usage", {})
-    if not isinstance(usage, dict):
-        usage = {}
+    input_tokens, output_tokens, total_tokens = _extract_usage(data)
     return ModelResponse(
         content=content,
-        input_tokens=usage.get("inputTokens") or usage.get("input_tokens"),
-        output_tokens=usage.get("outputTokens") or usage.get("output_tokens"),
-        total_tokens=usage.get("totalTokens") or usage.get("total_tokens"),
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        total_tokens=total_tokens,
     )
+
+
+def _extract_usage(data: dict[str, Any]) -> tuple[int | None, int | None, int | None]:
+    usage = _find_usage_data(data)
+    if usage is None:
+        return None, None, None
+
+    input_tokens = _first_int(
+        usage,
+        (
+            "inputTokens",
+            "input_tokens",
+            "promptTokens",
+            "prompt_tokens",
+            "inputTokenCount",
+            "input_token_count",
+            "promptTokenCount",
+            "prompt_token_count",
+        ),
+    )
+    output_tokens = _first_int(
+        usage,
+        (
+            "outputTokens",
+            "output_tokens",
+            "completionTokens",
+            "completion_tokens",
+            "generatedTokens",
+            "generated_tokens",
+            "outputTokenCount",
+            "output_token_count",
+            "completionTokenCount",
+            "completion_token_count",
+        ),
+    )
+    total_tokens = _first_int(
+        usage,
+        (
+            "totalTokens",
+            "total_tokens",
+            "totalTokenCount",
+            "total_token_count",
+        ),
+    )
+
+    if total_tokens is None and input_tokens is not None and output_tokens is not None:
+        total_tokens = input_tokens + output_tokens
+    if input_tokens is None and total_tokens is not None and output_tokens is not None:
+        input_tokens = total_tokens - output_tokens
+    if output_tokens is None and total_tokens is not None and input_tokens is not None:
+        output_tokens = total_tokens - input_tokens
+
+    return input_tokens, output_tokens, total_tokens
+
+
+def _find_usage_data(value: Any) -> dict[str, Any] | None:
+    if isinstance(value, list):
+        for item in value:
+            usage = _find_usage_data(item)
+            if usage is not None:
+                return usage
+        return None
+
+    if not isinstance(value, dict):
+        return None
+
+    if _has_token_usage_keys(value):
+        return value
+
+    for key in ("usage", "tokenUsage", "token_usage", "metrics", "metadata", "data"):
+        usage = _find_usage_data(value.get(key))
+        if usage is not None:
+            return usage
+
+    for nested_value in value.values():
+        usage = _find_usage_data(nested_value)
+        if usage is not None:
+            return usage
+
+    return None
+
+
+def _has_token_usage_keys(value: dict[str, Any]) -> bool:
+    return any(
+        key.lower().replace("_", "")
+        in {
+            "inputtokens",
+            "prompttokens",
+            "inputtokencount",
+            "prompttokencount",
+            "outputtokens",
+            "completiontokens",
+            "generatedtokens",
+            "outputtokencount",
+            "completiontokencount",
+            "totaltokens",
+            "totaltokencount",
+        }
+        for key in value
+    )
+
+
+def _first_int(value: dict[str, Any], keys: tuple[str, ...]) -> int | None:
+    for key in keys:
+        coerced = _coerce_int(value.get(key))
+        if coerced is not None:
+            return coerced
+    return None
+
+
+def _coerce_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value.strip())
+    return None
 
 
 def _extract_text(data: dict[str, Any]) -> str | None:

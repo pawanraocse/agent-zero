@@ -69,10 +69,12 @@ def test_ask_command_calls_model_and_prints_response(tmp_path, monkeypatch):
     assert len(fake_client.calls) == 1
     system_prompt, user_prompt = fake_client.calls[0]
     assert system_prompt == cli.ASK_SYSTEM_PROMPT
+    assert "Use the relevance guide to explain why files matter." in system_prompt
     assert "Distinguish included file contents" in system_prompt
     assert "User question:\nWhat does this project do?" in user_prompt
     assert "Repository context:" in user_prompt
     assert "Evidence boundary:" in user_prompt
+    assert "Relevance guide:" in user_prompt
     assert "README.md" in user_prompt
 
 
@@ -193,7 +195,78 @@ def test_ask_command_trace_prints_agent_timeline(tmp_path, monkeypatch):
     assert "8. Applied context budget:" in result.output
     assert "10. Focused excerpts: (none)" in result.output
     assert "12. Prepared ask prompt and called model" in result.output
+    assert "Agent trace debug:" not in result.output
     assert "ok" in result.output
+
+
+def test_ask_command_trace_level_debug_prints_detailed_trace(tmp_path, monkeypatch):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "AGENT_ZERO_BASE_URL=http://localhost:1234/v1",
+                "AGENT_ZERO_API_KEY=test-key",
+                "AGENT_ZERO_MODEL=test-model",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "README.md").write_text("# Agent Zero\n", encoding="utf-8")
+    fake_client = FakeModelClient(ModelResponse(content="ok"))
+    monkeypatch.setattr(cli, "create_model_client", lambda config: fake_client)
+    monkeypatch.chdir(tmp_path)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        [
+            "ask",
+            "What does this project do?",
+            "--trace-level",
+            "debug",
+            "--env-file",
+            str(env_file),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "Agent trace:" in result.output
+    assert "Agent trace debug:" in result.output
+    assert "- Selected file reasons:" in result.output
+    assert "  - README.md:" in result.output
+    assert "- Included content sizes:" in result.output
+    assert "ok" in result.output
+
+
+def test_ask_command_rejects_invalid_trace_level(tmp_path, monkeypatch):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "AGENT_ZERO_BASE_URL=http://localhost:1234/v1",
+                "AGENT_ZERO_API_KEY=test-key",
+                "AGENT_ZERO_MODEL=test-model",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        [
+            "ask",
+            "What does this project do?",
+            "--trace-level",
+            "verbose",
+            "--env-file",
+            str(env_file),
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "Invalid trace level. Use one of: none, basic, debug." in result.output
 
 
 def test_ask_command_prints_estimated_cost_when_prices_are_configured(
@@ -341,6 +414,12 @@ def test_ask_command_records_learning_memory(tmp_path, monkeypatch):
     assert records[-1]["useful_files"] == []
     assert records[-1]["success"] is True
     assert records[-1]["usage"]["total_tokens"] == 18
+    assert records[-1]["reflection"] == {
+        "lesson": "ask run succeeded, but no reusable file signal was recorded.",
+        "task_terms": ["project"],
+        "useful_files": [],
+        "confidence": "low",
+    }
 
 
 def test_ask_command_reports_model_errors(tmp_path, monkeypatch):
@@ -407,8 +486,10 @@ def test_plan_command_calls_model_and_prints_structured_plan(tmp_path, monkeypat
     assert len(fake_client.calls) == 1
     system_prompt, user_prompt = fake_client.calls[0]
     assert system_prompt == cli.PLAN_SYSTEM_PROMPT
+    assert "Use the relevance guide to explain why files matter." in system_prompt
     assert "Change request:\nAdd config loading" in user_prompt
     assert "Repository context:" in user_prompt
+    assert "Relevance guide:" in user_prompt
 
 
 def test_plan_command_show_context_prints_selection_reasons(tmp_path, monkeypatch):
@@ -817,6 +898,54 @@ def test_code_command_dry_run_prints_patch_without_changing_files(
     assert validation_calls == []
 
 
+def test_code_command_dry_run_prints_changed_python_symbols(tmp_path, monkeypatch):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "AGENT_ZERO_BASE_URL=http://localhost:1234/v1",
+                "AGENT_ZERO_API_KEY=test-key",
+                "AGENT_ZERO_MODEL=test-model",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    target = tmp_path / "app.py"
+    target.write_text(
+        "\n".join(
+            [
+                "def greet():",
+                '    return "old"',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    fake_client = FakeModelClient(
+        ModelResponse(
+            content="""diff --git a/app.py b/app.py
+--- a/app.py
++++ b/app.py
+@@ -2 +2 @@
+-    return "old"
++    return "new"
+"""
+        )
+    )
+    monkeypatch.setattr(cli, "create_model_client", lambda config: fake_client)
+    monkeypatch.chdir(tmp_path)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        ["code", "Change greeting", "--dry-run", "--env-file", str(env_file)],
+    )
+
+    assert result.exit_code == 0
+    assert "- app.py: +1 -1 (greet)" in result.output
+    assert target.read_text(encoding="utf-8") == 'def greet():\n    return "old"\n'
+
+
 def test_code_command_dry_run_trace_prints_code_steps(tmp_path, monkeypatch):
     env_file = tmp_path / ".env"
     env_file.write_text(
@@ -993,6 +1122,91 @@ def test_code_command_retries_empty_patch_in_dry_run(tmp_path, monkeypatch):
     assert "Rejected empty diff:" in fake_client.calls[1][1]
 
 
+def test_code_command_retries_patch_application_failure(tmp_path, monkeypatch):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "AGENT_ZERO_BASE_URL=http://localhost:1234/v1",
+                "AGENT_ZERO_API_KEY=test-key",
+                "AGENT_ZERO_MODEL=test-model",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    target = tmp_path / "README.md"
+    target.write_text(
+        "\n".join(
+            [
+                "# Demo",
+                "",
+                "Use `index` to build a local narrative map.",
+                "",
+                "This makes the context and cost tradeoff visible.",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    fake_client = SequenceModelClient(
+        [
+            ModelResponse(
+                content="""diff --git a/README.md b/README.md
+--- a/README.md
++++ b/README.md
+@@ -3,2 +3,3 @@
+ This makes the context
++Validation supports tests, lint, and format checks.
+"""
+            ),
+            ModelResponse(
+                content="""diff --git a/README.md b/README.md
+--- a/README.md
++++ b/README.md
+@@ -5,2 +5,3 @@
+ This makes the context and cost tradeoff visible.
++Validation supports tests, lint, and format checks.
+ 
+"""
+            ),
+        ]
+    )
+    monkeypatch.setattr(cli, "create_model_client", lambda config: fake_client)
+    monkeypatch.chdir(tmp_path)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        [
+            "code",
+            "Append one sentence to the end of README.md",
+            "--trace",
+            "--env-file",
+            str(env_file),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "Code trace: Patch application failed." in result.output
+    assert "Attempting one patch-application retry." in result.output
+    assert "Code trace: Patch-application retry model response received." in (
+        result.output
+    )
+    assert "Code trace: Patch-application retry applied patch to README.md." in (
+        result.output
+    )
+    assert "Applied patch." in result.output
+    assert "Validation supports tests, lint, and format checks." in target.read_text(
+        encoding="utf-8"
+    )
+    assert len(fake_client.calls) == 2
+    assert "Patch failure:" in fake_client.calls[1][1]
+    assert "Current file excerpts:" in fake_client.calls[1][1]
+    assert (
+        "This makes the context and cost tradeoff visible." in fake_client.calls[1][1]
+    )
+
+
 def test_code_command_treats_no_change_response_as_success(tmp_path, monkeypatch):
     env_file = tmp_path / ".env"
     env_file.write_text(
@@ -1084,7 +1298,9 @@ def test_code_command_reports_patch_failure(tmp_path, monkeypatch):
     )
 
     assert result.exit_code == 1
-    assert "Patch failed:" in result.output
+    assert "Attempting one patch-application retry." in result.output
+    assert "Patch failed after retry:" in result.output
+    assert len(fake_client.calls) == 2
     assert "context mismatch" in result.output
 
 
