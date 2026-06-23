@@ -820,6 +820,49 @@ Learning outcome:
 - Understand that persistent agent memory must be curated. Useful memory is not
   just more records; it is compact, deduplicated, and confidence-aware.
 
+### Milestone 32: Memory Candidate Classifier
+
+Goal: classify memory before treating it as reusable knowledge.
+
+Steps:
+
+1. Keep raw compacted run records in `.agent-zero/memory.jsonl`. Done.
+2. Add a local SQLite memory store at `.agent-zero/memory.db`. Done.
+3. Store deduplicated `memory_items` with type, claim, status, confidence,
+   task terms, useful files, and evidence. Done.
+4. Store `memory_events` so each learned item keeps an observation trail. Done.
+5. Mark successful ask runs without file evidence as low-confidence candidates.
+   Done.
+6. Mark successful file-backed runs as candidate project lessons. Done.
+7. Promote validated code runs to confirmed, high-confidence lessons. Done.
+8. Mark failed runs as rejected failure lessons. Done.
+
+Learning outcome:
+
+- Understand that memory selection is an agentic step. The agent should not
+  blindly remember every answer; it should classify evidence, confidence, and
+  status before using memory for future retrieval.
+
+### Milestone 33: Confirmed Memory Retrieval
+
+Goal: use curated memory as a retrieval signal.
+
+Steps:
+
+1. Load `.agent-zero/memory.db` during repository context building. Done.
+2. Score only confirmed memory items with medium or high confidence. Done.
+3. Match confirmed memory items by overlapping task terms. Done.
+4. Boost useful files recorded by those confirmed memory items. Done.
+5. Do not boost candidate or rejected memory items. Done.
+6. Show SQLite memory usage in `--show-context`. Done.
+7. Show SQLite memory loading in `--trace`. Done.
+
+Learning outcome:
+
+- Understand the difference between storing memory and using memory. Raw logs
+  explain what happened, candidate memory records what may be useful, and
+  confirmed memory can safely influence future context selection.
+
 ## Suggested Implementation Order
 
 Build in this order:
@@ -860,6 +903,8 @@ Build in this order:
 34. Trace verbosity levels.
 35. Reflection memory records.
 36. Memory hygiene.
+37. Memory candidate classifier.
+38. Confirmed memory retrieval.
 
 Each step should leave the project runnable.
 

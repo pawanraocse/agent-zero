@@ -1,6 +1,7 @@
-from pathlib import Path
-import os
 from dataclasses import dataclass
+import json
+import os
+from pathlib import Path
 from typing import Literal
 
 import typer
@@ -19,7 +20,14 @@ from agent_zero.diff_summary import (
     summarize_unified_diff,
 )
 from agent_zero.evals import EvalSpec, EvalSpecError, load_eval_spec, write_eval_result
-from agent_zero.memory import append_memory_record, build_reflection, task_terms
+from agent_zero.memory import (
+    append_memory_record,
+    build_reflection,
+    load_memory,
+    load_memory_items,
+    task_terms,
+    write_memory_candidate,
+)
 from agent_zero.model_client import ModelClientError, create_model_client
 from agent_zero.repo_index import (
     build_repo_index,
@@ -229,6 +237,10 @@ def _print_trace(
         f"Searched repository text: {len(repository_context.search_results)} result(s)",
         f"Loaded repo index: {'used' if decision.index_used else 'not found'}",
         f"Loaded learning memory: {'used' if decision.memory_used else 'not found'}",
+        (
+            "Loaded SQLite memory: "
+            f"{'used' if decision.sqlite_memory_used else 'not found'}"
+        ),
         f"Selected files: {selected_files}",
         f"Included content files: {included_files}",
         (
@@ -363,7 +375,9 @@ def _record_memory(
         record["validation_passed"] = validation_passed
     record["reflection"] = build_reflection(record)
 
-    append_memory_record(Path.cwd(), record)
+    root = Path.cwd()
+    append_memory_record(root, record)
+    write_memory_candidate(root, record)
 
 
 def _complete_with_config(system_prompt: str, user_prompt: str, config):
@@ -503,6 +517,91 @@ def index_command(
     typer.echo(f"Index written: {output_path}")
     typer.echo(f"Files indexed: {index_file_count(index)}")
     typer.echo(f"Relationships: {index_relationship_count(index)}")
+
+
+@app.command("memory")
+def memory_command(
+    status: str | None = typer.Option(
+        None,
+        "--status",
+        help="Filter SQLite memory items by status: candidate, confirmed, or rejected.",
+    ),
+    limit: int = typer.Option(
+        10,
+        "--limit",
+        min=1,
+        help="Maximum SQLite memory items to print per group.",
+    ),
+    json_output: bool = typer.Option(
+        False,
+        "--json",
+        help="Print memory summary as JSON.",
+    ),
+) -> None:
+    """Inspect raw and curated local memory."""
+    root = Path.cwd()
+    raw_records = load_memory(root)
+    memory_items = load_memory_items(root)
+    if status is not None:
+        valid_statuses = {"candidate", "confirmed", "rejected"}
+        if status not in valid_statuses:
+            typer.secho(
+                "Invalid status. Use one of: candidate, confirmed, rejected.",
+                fg=typer.colors.RED,
+                err=True,
+            )
+            raise typer.Exit(code=2)
+        memory_items = [item for item in memory_items if item["status"] == status]
+
+    if json_output:
+        typer.echo(
+            json.dumps(
+                {
+                    "raw_memory_records": len(raw_records),
+                    "sqlite_memory_items": len(memory_items),
+                    "items": memory_items,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return
+
+    typer.echo(f"Raw memory records: {len(raw_records)}")
+    typer.echo(f"SQLite memory items: {len(memory_items)}")
+    typer.echo("")
+    for label, status_value in (
+        ("Confirmed", "confirmed"),
+        ("Candidates", "candidate"),
+        ("Rejected", "rejected"),
+    ):
+        if status is not None and status != status_value:
+            continue
+        _print_memory_group(label, memory_items, status_value, limit)
+
+
+def _print_memory_group(
+    label: str,
+    memory_items: list[dict],
+    status: str,
+    limit: int,
+) -> None:
+    grouped_items = [item for item in memory_items if item["status"] == status]
+    typer.echo(f"{label}:")
+    if not grouped_items:
+        typer.echo("- (none)")
+        typer.echo("")
+        return
+
+    for item in grouped_items[-limit:]:
+        confidence = item.get("confidence", "unknown")
+        claim = item.get("claim", "(no claim)")
+        typer.echo(f"- [{confidence}] {claim}")
+        useful_files = item.get("useful_files") or []
+        if useful_files:
+            typer.echo(f"  files: {', '.join(useful_files)}")
+        typer.echo(f"  use_count: {item.get('use_count', 0)}")
+    typer.echo("")
 
 
 @app.command()

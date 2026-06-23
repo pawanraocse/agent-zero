@@ -3,8 +3,12 @@ import json
 from agent_zero.memory import (
     append_memory_record,
     build_reflection,
+    classify_memory_candidate,
     load_memory,
+    load_memory_items,
     memory_file_scores,
+    memory_item_scores,
+    write_memory_candidate,
 )
 
 
@@ -122,6 +126,33 @@ def test_memory_file_scores_does_not_treat_selected_files_as_useful():
     assert memory_file_scores(records, ["bedrock", "gateway"]) == {}
 
 
+def test_memory_item_scores_only_boosts_confirmed_items():
+    items = [
+        {
+            "status": "confirmed",
+            "confidence": "high",
+            "task_terms": ["bedrock", "gateway"],
+            "useful_files": ["agent_zero/model_client.py"],
+        },
+        {
+            "status": "candidate",
+            "confidence": "medium",
+            "task_terms": ["bedrock", "gateway"],
+            "useful_files": ["agent_zero/config.py"],
+        },
+        {
+            "status": "rejected",
+            "confidence": "low",
+            "task_terms": ["bedrock", "gateway"],
+            "useful_files": ["agent_zero/old.py"],
+        },
+    ]
+
+    scores = memory_item_scores(items, ["bedrock", "gateway"])
+
+    assert scores == {"agent_zero/model_client.py": 12}
+
+
 def test_load_memory_ignores_invalid_json_lines(tmp_path):
     memory_dir = tmp_path / ".agent-zero"
     memory_dir.mkdir()
@@ -177,3 +208,69 @@ def test_build_reflection_for_failed_run_is_low_confidence():
     )
     assert reflection["confidence"] == "low"
     assert reflection["useful_files"] == []
+
+
+def test_classify_memory_candidate_confirms_validated_code_runs():
+    candidate = classify_memory_candidate(
+        {
+            "mode": "code",
+            "task_terms": ["bedrock", "gateway"],
+            "changed_files": ["agent_zero/model_client.py"],
+            "status": "validation_passed",
+            "success": True,
+            "validation_passed": True,
+        }
+    )
+
+    assert candidate is not None
+    assert candidate["type"] == "project_lesson"
+    assert candidate["status"] == "confirmed"
+    assert candidate["confidence"] == "high"
+    assert candidate["useful_files"] == ["agent_zero/model_client.py"]
+    assert "validation_passed" in candidate["evidence"]
+
+
+def test_classify_memory_candidate_rejects_failed_runs():
+    candidate = classify_memory_candidate(
+        {
+            "mode": "code",
+            "task_terms": ["readme"],
+            "status": "patch_failed",
+            "success": False,
+        }
+    )
+
+    assert candidate is not None
+    assert candidate["type"] == "failure_lesson"
+    assert candidate["status"] == "rejected"
+    assert candidate["confidence"] == "low"
+
+
+def test_write_memory_candidate_stores_sqlite_item(tmp_path):
+    record = {
+        "mode": "code",
+        "task_terms": ["bedrock", "gateway"],
+        "changed_files": ["agent_zero/model_client.py"],
+        "status": "validation_passed",
+        "success": True,
+        "validation_passed": True,
+        "reflection": {
+            "lesson": "validated",
+            "task_terms": ["bedrock", "gateway"],
+            "useful_files": ["agent_zero/model_client.py"],
+            "confidence": "high",
+        },
+    }
+
+    db_path = write_memory_candidate(tmp_path, record)
+    write_memory_candidate(tmp_path, record)
+    items = load_memory_items(tmp_path)
+
+    assert db_path == tmp_path / ".agent-zero" / "memory.db"
+    assert len(items) == 1
+    assert items[0]["type"] == "project_lesson"
+    assert items[0]["status"] == "confirmed"
+    assert items[0]["confidence"] == "high"
+    assert items[0]["task_terms"] == ["bedrock", "gateway"]
+    assert items[0]["useful_files"] == ["agent_zero/model_client.py"]
+    assert items[0]["use_count"] == 2

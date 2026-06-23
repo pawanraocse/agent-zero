@@ -5,6 +5,7 @@ from typer.testing import CliRunner
 
 from agent_zero import cli
 from agent_zero.cli import app
+from agent_zero.memory import append_memory_record, load_memory_items, write_memory_candidate
 from agent_zero.tools.command_tool import CommandResult
 from agent_zero.model_client import ModelClientError, ModelResponse
 
@@ -112,6 +113,7 @@ def test_ask_command_show_context_prints_selection_reasons(tmp_path, monkeypatch
     assert "Query terms: this, project" in result.output
     assert "Repo index: not found" in result.output
     assert "Learning memory: not found" in result.output
+    assert "SQLite memory: not found" in result.output
     assert "- README.md: overview prior" in result.output
     assert "ok" in result.output
 
@@ -190,11 +192,12 @@ def test_ask_command_trace_prints_agent_timeline(tmp_path, monkeypatch):
     assert "3. Searched repository text:" in result.output
     assert "4. Loaded repo index: not found" in result.output
     assert "5. Loaded learning memory: not found" in result.output
-    assert "6. Selected files: README.md" in result.output
-    assert "7. Included content files: README.md" in result.output
-    assert "8. Applied context budget:" in result.output
-    assert "10. Focused excerpts: (none)" in result.output
-    assert "12. Prepared ask prompt and called model" in result.output
+    assert "6. Loaded SQLite memory: not found" in result.output
+    assert "7. Selected files: README.md" in result.output
+    assert "8. Included content files: README.md" in result.output
+    assert "9. Applied context budget:" in result.output
+    assert "11. Focused excerpts: (none)" in result.output
+    assert "13. Prepared ask prompt and called model" in result.output
     assert "Agent trace debug:" not in result.output
     assert "ok" in result.output
 
@@ -420,6 +423,11 @@ def test_ask_command_records_learning_memory(tmp_path, monkeypatch):
         "useful_files": [],
         "confidence": "low",
     }
+    memory_items = load_memory_items(tmp_path)
+    assert len(memory_items) == 1
+    assert memory_items[0]["type"] == "interaction_observation"
+    assert memory_items[0]["status"] == "candidate"
+    assert memory_items[0]["confidence"] == "low"
 
 
 def test_ask_command_reports_model_errors(tmp_path, monkeypatch):
@@ -560,7 +568,7 @@ def test_plan_command_trace_prints_agent_timeline(tmp_path, monkeypatch):
     assert result.exit_code == 0
     assert "Agent trace:" in result.output
     assert "1. Loaded config: provider=openai, model=test-model" in result.output
-    assert "12. Prepared plan prompt and called model" in result.output
+    assert "13. Prepared plan prompt and called model" in result.output
     assert "1. Summary" in result.output
 
 
@@ -634,6 +642,137 @@ def test_index_command_writes_repo_index(tmp_path, monkeypatch):
         "README.md",
         "agent_zero/config.py",
     ]
+
+
+def test_memory_command_prints_empty_summary(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["memory"])
+
+    assert result.exit_code == 0
+    assert "Raw memory records: 0" in result.output
+    assert "SQLite memory items: 0" in result.output
+    assert "Confirmed:\n- (none)" in result.output
+    assert "Candidates:\n- (none)" in result.output
+    assert "Rejected:\n- (none)" in result.output
+
+
+def test_memory_command_groups_raw_and_curated_memory(tmp_path, monkeypatch):
+    append_memory_record(
+        tmp_path,
+        {
+            "mode": "ask",
+            "task_terms": ["project"],
+            "selected_files": ["README.md"],
+            "useful_files": [],
+            "status": "ask_completed",
+            "success": True,
+        },
+    )
+    write_memory_candidate(
+        tmp_path,
+        {
+            "mode": "code",
+            "task_terms": ["bedrock", "gateway"],
+            "changed_files": ["agent_zero/model_client.py"],
+            "status": "validation_passed",
+            "success": True,
+            "validation_passed": True,
+        },
+    )
+    write_memory_candidate(
+        tmp_path,
+        {
+            "mode": "ask",
+            "task_terms": ["project"],
+            "status": "ask_completed",
+            "success": True,
+        },
+    )
+    write_memory_candidate(
+        tmp_path,
+        {
+            "mode": "code",
+            "task_terms": ["readme"],
+            "status": "patch_failed",
+            "success": False,
+        },
+    )
+    monkeypatch.chdir(tmp_path)
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["memory"])
+
+    assert result.exit_code == 0
+    assert "Raw memory records: 1" in result.output
+    assert "SQLite memory items: 3" in result.output
+    assert "Confirmed:" in result.output
+    assert "[high] code task with terms bedrock, gateway used agent_zero/model_client.py." in result.output
+    assert "files: agent_zero/model_client.py" in result.output
+    assert "Candidates:" in result.output
+    assert "[low] ask task with terms project completed without reusable file evidence." in result.output
+    assert "Rejected:" in result.output
+    assert "[low] code task with terms readme ended with patch_failed." in result.output
+
+
+def test_memory_command_filters_by_status(tmp_path, monkeypatch):
+    write_memory_candidate(
+        tmp_path,
+        {
+            "mode": "code",
+            "task_terms": ["bedrock"],
+            "changed_files": ["agent_zero/model_client.py"],
+            "status": "validation_passed",
+            "success": True,
+            "validation_passed": True,
+        },
+    )
+    write_memory_candidate(
+        tmp_path,
+        {
+            "mode": "ask",
+            "task_terms": ["project"],
+            "status": "ask_completed",
+            "success": True,
+        },
+    )
+    monkeypatch.chdir(tmp_path)
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["memory", "--status", "confirmed"])
+
+    assert result.exit_code == 0
+    assert "SQLite memory items: 1" in result.output
+    assert "Confirmed:" in result.output
+    assert "Candidates:" not in result.output
+    assert "Rejected:" not in result.output
+    assert "agent_zero/model_client.py" in result.output
+    assert "without reusable file evidence" not in result.output
+
+
+def test_memory_command_prints_json(tmp_path, monkeypatch):
+    write_memory_candidate(
+        tmp_path,
+        {
+            "mode": "code",
+            "task_terms": ["bedrock"],
+            "changed_files": ["agent_zero/model_client.py"],
+            "status": "validation_passed",
+            "success": True,
+            "validation_passed": True,
+        },
+    )
+    monkeypatch.chdir(tmp_path)
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["memory", "--json"])
+
+    assert result.exit_code == 0
+    data = json.loads(result.output)
+    assert data["raw_memory_records"] == 0
+    assert data["sqlite_memory_items"] == 1
+    assert data["items"][0]["status"] == "confirmed"
 
 
 def test_eval_command_runs_ask_eval_and_writes_result(tmp_path, monkeypatch):
@@ -990,7 +1129,7 @@ def test_code_command_dry_run_trace_prints_code_steps(tmp_path, monkeypatch):
 
     assert result.exit_code == 0
     assert "Agent trace:" in result.output
-    assert "12. Prepared code prompt and called model" in result.output
+    assert "13. Prepared code prompt and called model" in result.output
     assert "Code trace: Model response received." in result.output
     assert "Code trace: Extracted unified diff." in result.output
     assert "Code trace: Patch summary prepared for 1 file(s)." in result.output

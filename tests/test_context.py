@@ -1,4 +1,5 @@
 from agent_zero.context import build_repository_context, decide_context_files
+from agent_zero.memory import write_memory_candidate
 
 
 def test_build_repository_context_includes_overview_files(tmp_path):
@@ -91,6 +92,35 @@ def test_build_repository_context_uses_focused_excerpts(tmp_path):
         "- README.md: primary evidence from focused included content; "
         "matched repository search results"
     ) in prompt
+
+
+def test_build_repository_context_loads_confirmed_sqlite_memory(tmp_path):
+    package = tmp_path / "agent_zero"
+    package.mkdir()
+    (package / "model_client.py").write_text(
+        "class BedrockGatewayClient:\n    pass\n",
+        encoding="utf-8",
+    )
+    write_memory_candidate(
+        tmp_path,
+        {
+            "mode": "code",
+            "task_terms": ["bedrock", "gateway"],
+            "changed_files": ["agent_zero/model_client.py"],
+            "status": "validation_passed",
+            "success": True,
+            "validation_passed": True,
+        },
+    )
+
+    context = build_repository_context(tmp_path, "Explain bedrock gateway")
+
+    assert context.decision.sqlite_memory_used is True
+    assert context.decision.selected_files == ["agent_zero/model_client.py"]
+    assert (
+        "sqlite memory boost from confirmed lesson +12"
+        in context.decision.reasons["agent_zero/model_client.py"]
+    )
 
 
 def test_decide_context_files_ranks_config_files_for_bedrock_questions():
@@ -245,6 +275,43 @@ def test_decide_context_files_uses_learning_memory():
         "memory boost from similar successful task +4"
         in decision.reasons["agent_zero/model_client.py"]
     )
+
+
+def test_decide_context_files_uses_confirmed_sqlite_memory():
+    files = [
+        "README.md",
+        "agent_zero/model_client.py",
+    ]
+    memory_items = [
+        {
+            "status": "confirmed",
+            "confidence": "high",
+            "task_terms": ["bedrock", "gateway"],
+            "useful_files": ["agent_zero/model_client.py"],
+        },
+        {
+            "status": "candidate",
+            "confidence": "medium",
+            "task_terms": ["bedrock", "gateway"],
+            "useful_files": ["README.md"],
+        },
+    ]
+
+    decision = decide_context_files(
+        files=files,
+        task="Explain bedrock gateway",
+        search_results=[],
+        max_snippets=2,
+        memory_items=memory_items,
+    )
+
+    assert decision.sqlite_memory_used is True
+    assert decision.selected_files == ["agent_zero/model_client.py"]
+    assert (
+        "sqlite memory boost from confirmed lesson +12"
+        in decision.reasons["agent_zero/model_client.py"]
+    )
+    assert "README.md" not in decision.reasons
 
 
 def test_decide_context_files_penalizes_tests_for_non_test_tasks():

@@ -1,7 +1,12 @@
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
-from agent_zero.memory import load_memory, memory_file_scores
+from agent_zero.memory import (
+    load_memory,
+    load_memory_items,
+    memory_file_scores,
+    memory_item_scores,
+)
 from agent_zero.repo_index import (
     index_entries_by_path,
     index_relationships,
@@ -52,6 +57,7 @@ class ContextDecision:
     reasons: dict[str, list[str]]
     index_used: bool = False
     memory_used: bool = False
+    sqlite_memory_used: bool = False
     target_files: list[str] = field(default_factory=list)
     context_budget_tokens: int | None = None
     context_content_tokens: int = 0
@@ -125,6 +131,7 @@ def build_repository_context(
     search_results = search_text(root, task)
     repo_index = load_repo_index(root)
     memory_records = load_memory(root)
+    memory_items = load_memory_items(root)
     decision = decide_context_files(
         files=files,
         task=task,
@@ -132,6 +139,7 @@ def build_repository_context(
         max_snippets=max_snippets,
         repo_index=repo_index,
         memory_records=memory_records,
+        memory_items=memory_items,
     )
     snippets, truncated_files, focused_files, skipped_files = _read_budgeted_snippets(
         root=root,
@@ -205,11 +213,13 @@ def decide_context_files(
     max_snippets: int,
     repo_index: dict | None = None,
     memory_records: list[dict] | None = None,
+    memory_items: list[dict] | None = None,
 ) -> ContextDecision:
     terms = _query_terms(task)
     search_paths = _paths_from_search_results(search_results)
     index_entries = index_entries_by_path(repo_index)
     memory_scores = memory_file_scores(memory_records or [], terms)
+    sqlite_memory_scores = memory_item_scores(memory_items or [], terms)
     target_files = _explicit_target_files(task, files)
     scores: dict[str, int] = {}
     reasons: dict[str, list[str]] = {}
@@ -228,6 +238,7 @@ def decide_context_files(
             reasons[path] = path_reasons
 
     _apply_memory_boosts(scores, reasons, memory_scores, files)
+    _apply_sqlite_memory_boosts(scores, reasons, sqlite_memory_scores, files)
     _apply_index_relationship_boosts(
         scores,
         reasons,
@@ -262,6 +273,7 @@ def decide_context_files(
         reasons={path: reasons[path] for path in selected_files},
         index_used=bool(repo_index),
         memory_used=bool(memory_records),
+        sqlite_memory_used=bool(memory_items),
         target_files=target_files,
     )
 
@@ -390,6 +402,22 @@ def _apply_memory_boosts(
         scores[path] = scores.get(path, 0) + boost
         reasons.setdefault(path, []).append(
             f"memory boost from similar successful task +{boost}"
+        )
+
+
+def _apply_sqlite_memory_boosts(
+    scores: dict[str, int],
+    reasons: dict[str, list[str]],
+    memory_scores: dict[str, int],
+    files: list[str],
+) -> None:
+    file_set = set(files)
+    for path, boost in memory_scores.items():
+        if path not in file_set or not _is_likely_text_context(path):
+            continue
+        scores[path] = scores.get(path, 0) + boost
+        reasons.setdefault(path, []).append(
+            f"sqlite memory boost from confirmed lesson +{boost}"
         )
 
 
@@ -550,6 +578,7 @@ def _has_direct_retrieval_reason(reasons: list[str]) -> bool:
         or reason.startswith("index symbol")
         or reason.startswith("index summary")
         or reason.startswith("memory boost")
+        or reason.startswith("sqlite memory boost")
         for reason in reasons
     )
 
@@ -602,6 +631,7 @@ def _format_context_decision(decision: ContextDecision) -> str:
         f"Query terms: {', '.join(decision.query_terms) or '(none)'}",
         f"Repo index: {'used' if decision.index_used else 'not found'}",
         f"Learning memory: {'used' if decision.memory_used else 'not found'}",
+        (f"SQLite memory: {'used' if decision.sqlite_memory_used else 'not found'}"),
     ]
     if decision.target_files:
         lines.append(f"Target files: {', '.join(decision.target_files)}")
@@ -706,6 +736,8 @@ def _humanize_relevance_reason(reason: str) -> str:
         return "repo index relationship: " + reason.replace("index related via ", "")
     if reason.startswith("memory boost"):
         return "learning memory says this file helped similar tasks"
+    if reason.startswith("sqlite memory boost"):
+        return "confirmed SQLite memory says this file helped similar tasks"
     return reason
 
 

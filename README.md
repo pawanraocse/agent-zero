@@ -85,6 +85,71 @@ Supported tools:
 - Token usage and estimated cost reporting.
 - JSON eval runs for repeatable model comparison.
 
+## Current Status And Pending Work
+
+Agent Zero is now a working learning-focused coding-agent harness. It is not a
+Hermes-style second brain yet, but it has the foundations needed to move in
+that direction.
+
+Completed:
+
+- CLI modes: `ask`, `plan`, `code`, `eval`, and `index`.
+- Providers: OpenAI-compatible APIs and an async Bedrock gateway.
+- Repository retrieval: file listing, text search, repo index, learning memory,
+  confirmed SQLite memory, target-file narrowing, and relevance explanations.
+- Context control: token budgets, focused snippets, symbol-aware snippets,
+  oversized class slicing, method slicing, and evidence boundaries.
+- Coding loop: unified diff extraction, safe patch application, dry-run mode,
+  validation, one validation-fix retry, empty-patch retry, and patch-application
+  retry.
+- Validation: single validation command or layered test, lint, and format
+  commands.
+- Observability: `--show-context`, `--trace`, `--trace-level`, patch summaries,
+  changed Python symbols, token usage, and cost output.
+- Local learning: `.agent-zero/memory.jsonl`, reflection records, confidence
+  labels, duplicate compaction, memory hygiene, SQLite memory candidates, and
+  confirmed-memory retrieval boosts.
+
+Pending:
+
+- Semantic memory retrieval using embeddings or a graph index.
+- A memory inspection command, for example `python -m agent_zero memory`.
+- Memory pruning or reset commands for local hygiene.
+- Stronger eval suites that repeatedly test ask, plan, code, retries, Bedrock,
+  and memory behavior.
+- Better language support for changed-symbol summaries beyond Python.
+- Optional streaming output for providers that support it.
+- Packaging polish for publishing as a reusable CLI.
+
+Recommended next milestone:
+
+> Add a memory inspection command so learners can see raw JSONL records,
+> SQLite candidates, confirmed lessons, and rejected lessons from the CLI.
+
+### Why Two Memory Stores?
+
+Agent Zero currently keeps both `.agent-zero/memory.jsonl` and
+`.agent-zero/memory.db` on purpose.
+
+`.agent-zero/memory.jsonl` is the raw audit log. It is easy to open, read, and
+debug. It records what happened during each run: selected files, status, usage,
+cost, and reflection.
+
+`.agent-zero/memory.db` is the curated learning store. It records what the agent
+may safely learn from a run: candidate lessons, confirmed lessons, rejected
+lessons, confidence, evidence, and useful files for future retrieval.
+
+In short:
+
+```text
+memory.jsonl = history / audit / debugging
+memory.db    = learned memory / retrieval signal
+```
+
+Keeping both makes the learning process visible. Later, SQLite can fully replace
+JSONL after it stores enough event history, usage metadata, inspection commands,
+and pruning/reset support.
+
 ## How The Agent Loop Works
 
 ```mermaid
@@ -401,12 +466,13 @@ Context selection:
 Query terms: explain, bedrock, gateway
 Repo index: used
 Learning memory: used
-- agent_zero/model_client.py: content search hit; index concept matches: bedrock, gateway; memory boost from similar successful task +4
+SQLite memory: used
+- agent_zero/model_client.py: content search hit; index concept matches: bedrock, gateway; memory boost from similar successful task +4; sqlite memory boost from confirmed lesson +12
 ```
 
-This is useful for checking whether the repo index or learning memory actually
-influenced retrieval. The text after each selected file is the reason Agent Zero
-considered that file relevant.
+This is useful for checking whether the repo index, raw learning memory, or
+confirmed SQLite memory actually influenced retrieval. The text after each
+selected file is the reason Agent Zero considered that file relevant.
 
 Use `--context-budget` to control the approximate token budget for selected file
 contents:
@@ -439,13 +505,14 @@ Agent trace:
 3. Searched repository text: 8 result(s)
 4. Loaded repo index: used
 5. Loaded learning memory: used
-6. Selected files: agent_zero/model_client.py, README.md, .env.example
-7. Included content files: agent_zero/model_client.py, README.md, .env.example
-8. Applied context budget: 8000 tokens, selected content ~4200 tokens
-9. Truncated files: (none)
-10. Focused excerpts: (none)
-11. Skipped file contents: (none)
-12. Prepared ask prompt and called model
+6. Loaded SQLite memory: used
+7. Selected files: agent_zero/model_client.py, README.md, .env.example
+8. Included content files: agent_zero/model_client.py, README.md, .env.example
+9. Applied context budget: 8000 tokens, selected content ~4200 tokens
+10. Truncated files: (none)
+11. Focused excerpts: (none)
+12. Skipped file contents: (none)
+13. Prepared ask prompt and called model
 ```
 
 `--show-context` explains why files were selected. `--trace` explains what the
@@ -1231,6 +1298,55 @@ Learning outcome:
 
 - Persistent memory needs hygiene. Without merging and confidence handling,
   self-learning systems quickly turn useful feedback into noisy logs.
+
+### Milestone 32: Memory Candidate Classifier
+
+Goal: separate raw run history from curated learning candidates.
+
+Built:
+
+- A local SQLite store at `.agent-zero/memory.db`.
+- `memory_items` for deduplicated lessons the agent may learn from.
+- `memory_events` for the observation history behind each item.
+- Memory statuses: `candidate`, `confirmed`, and `rejected`.
+- Memory confidence levels: `low`, `medium`, and `high`.
+- Ask runs without reusable file evidence become low-confidence interaction
+  observations.
+- Successful runs with useful or changed files become project lessons.
+- Validated code runs become confirmed, high-confidence memory items.
+- Failed runs become rejected failure lessons, so they are not treated as useful
+  retrieval boosts.
+
+Learning outcome:
+
+- Self-learning is not the same as saving every answer. A useful agent should
+  first classify what happened, preserve evidence, and only promote stronger
+  signals when validation or repeated use supports them.
+- This is why Agent Zero keeps raw memory and curated memory separate:
+  `memory.jsonl` explains the run history, while `memory.db` decides what can
+  influence future retrieval.
+
+### Milestone 33: Confirmed Memory Retrieval
+
+Goal: use curated SQLite memory during context selection.
+
+Built:
+
+- Context selection loads `.agent-zero/memory.db` alongside
+  `.agent-zero/memory.jsonl`.
+- Confirmed SQLite memory items can boost useful files for similar future
+  tasks.
+- Candidate and rejected memory items are stored but do not influence retrieval.
+- `--show-context` displays `SQLite memory: used` when the database exists.
+- `--trace` includes a dedicated SQLite-memory loading step.
+- Relevance reasons show `sqlite memory boost from confirmed lesson +N`.
+
+Learning outcome:
+
+- This closes the first learning loop: run a task, classify memory, confirm
+  useful evidence, and let future context selection reuse that curated signal.
+  Raw logs remain useful for audit and debugging; confirmed SQLite items are the
+  safer retrieval signal.
 
 ## Design Principles
 
