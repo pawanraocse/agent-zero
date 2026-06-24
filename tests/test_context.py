@@ -56,6 +56,23 @@ def test_build_repository_context_applies_context_budget(tmp_path):
     assert "Included selected file contents:" in prompt
 
 
+def test_build_repository_context_allows_large_file_to_use_remaining_budget(tmp_path):
+    content = "a" * 7000
+    (tmp_path / "README.md").write_text(content, encoding="utf-8")
+
+    context = build_repository_context(
+        tmp_path,
+        "Update README.md",
+        context_budget_tokens=2000,
+    )
+
+    assert context.decision.included_files == ["README.md"]
+    assert context.decision.context_content_tokens == 1750
+    assert context.decision.truncated_files == []
+    assert context.decision.focused_files == []
+    assert context.snippets[0].content == content
+
+
 def test_build_repository_context_uses_focused_excerpts(tmp_path):
     content = "\n".join(
         [

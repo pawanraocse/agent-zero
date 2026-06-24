@@ -22,9 +22,13 @@ from agent_zero.diff_summary import (
 from agent_zero.evals import EvalSpec, EvalSpecError, load_eval_spec, write_eval_result
 from agent_zero.memory import (
     append_memory_record,
+    apply_memory_feedback,
     build_reflection,
+    delete_memory_items,
+    detect_user_feedback,
     load_memory,
     load_memory_items,
+    reset_memory,
     task_terms,
     write_memory_candidate,
 )
@@ -537,13 +541,43 @@ def memory_command(
         "--json",
         help="Print memory summary as JSON.",
     ),
+    prune: bool = typer.Option(
+        False,
+        "--prune",
+        help="Prune low-value SQLite memory. Defaults to rejected items.",
+    ),
+    reset: bool = typer.Option(
+        False,
+        "--reset",
+        help="Reset curated SQLite memory. Requires --yes to delete.",
+    ),
+    include_raw: bool = typer.Option(
+        False,
+        "--include-raw",
+        help="With --reset, also delete the raw JSONL audit log.",
+    ),
+    feedback: str | None = typer.Option(
+        None,
+        "--feedback",
+        help="Apply user feedback to the latest memory item: worked or failed.",
+    ),
+    detect_feedback: str | None = typer.Option(
+        None,
+        "--detect-feedback",
+        help="Detect feedback from text. Dry-run unless --yes is provided.",
+    ),
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        help="Confirm destructive memory maintenance actions.",
+    ),
 ) -> None:
     """Inspect raw and curated local memory."""
     root = Path.cwd()
     raw_records = load_memory(root)
     memory_items = load_memory_items(root)
+    valid_statuses = {"candidate", "confirmed", "rejected"}
     if status is not None:
-        valid_statuses = {"candidate", "confirmed", "rejected"}
         if status not in valid_statuses:
             typer.secho(
                 "Invalid status. Use one of: candidate, confirmed, rejected.",
@@ -552,6 +586,62 @@ def memory_command(
             )
             raise typer.Exit(code=2)
         memory_items = [item for item in memory_items if item["status"] == status]
+
+    if detect_feedback is not None:
+        if feedback is not None or prune or reset:
+            typer.secho(
+                "--detect-feedback cannot be combined with --feedback, --prune, or --reset.",
+                fg=typer.colors.RED,
+                err=True,
+            )
+            raise typer.Exit(code=2)
+        _handle_memory_detect_feedback(
+            root=root,
+            text=detect_feedback,
+            status=status,
+            yes=yes,
+            json_output=json_output,
+        )
+        return
+
+    if feedback is not None:
+        if prune or reset:
+            typer.secho(
+                "--feedback cannot be combined with --prune or --reset.",
+                fg=typer.colors.RED,
+                err=True,
+            )
+            raise typer.Exit(code=2)
+        _handle_memory_feedback(
+            root=root,
+            feedback=feedback,
+            status=status,
+            json_output=json_output,
+        )
+        return
+
+    if prune:
+        _handle_memory_prune(
+            root=root,
+            raw_record_count=len(raw_records),
+            memory_items=memory_items,
+            status=status or "rejected",
+            yes=yes,
+            json_output=json_output,
+            limit=limit,
+        )
+        return
+
+    if reset:
+        _handle_memory_reset(
+            root=root,
+            raw_record_count=len(raw_records),
+            memory_item_count=len(memory_items),
+            include_raw=include_raw,
+            yes=yes,
+            json_output=json_output,
+        )
+        return
 
     if json_output:
         typer.echo(
@@ -578,6 +668,204 @@ def memory_command(
         if status is not None and status != status_value:
             continue
         _print_memory_group(label, memory_items, status_value, limit)
+
+
+def _handle_memory_prune(
+    root: Path,
+    raw_record_count: int,
+    memory_items: list[dict],
+    status: str,
+    yes: bool,
+    json_output: bool,
+    limit: int,
+) -> None:
+    if status == "confirmed":
+        typer.secho(
+            "Refusing to prune confirmed memory. Confirmed lessons are protected.",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
+    prunable_items = [item for item in memory_items if item["status"] == status]
+    if json_output:
+        deleted_count = (
+            delete_memory_items(root, {status}) if yes and prunable_items else 0
+        )
+        typer.echo(
+            json.dumps(
+                {
+                    "action": "prune",
+                    "dry_run": not yes,
+                    "status": status,
+                    "raw_memory_records": raw_record_count,
+                    "prunable_items": len(prunable_items),
+                    "deleted_items": deleted_count,
+                    "items": prunable_items,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return
+
+    if not yes:
+        typer.echo("Dry run: no memory deleted.")
+        typer.echo(f"Prunable {status} memory items: {len(prunable_items)}")
+        typer.echo("")
+        _print_memory_group("Would prune", prunable_items, status, limit)
+        typer.echo("Re-run with --yes to delete these SQLite memory items.")
+        return
+
+    deleted_count = delete_memory_items(root, {status})
+    typer.echo(f"Deleted {status} memory items: {deleted_count}")
+    typer.echo("Confirmed memory kept.")
+
+
+def _handle_memory_feedback(
+    root: Path,
+    feedback: str,
+    status: str | None,
+    json_output: bool,
+) -> None:
+    if feedback not in {"worked", "failed"}:
+        typer.secho(
+            "Invalid feedback. Use one of: worked, failed.",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
+    try:
+        item = apply_memory_feedback(root, feedback, status=status)
+    except ValueError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2) from exc
+
+    if json_output:
+        typer.echo(
+            json.dumps(
+                {
+                    "action": "feedback",
+                    "feedback": feedback,
+                    "status_filter": status,
+                    "updated": item is not None,
+                    "item": item,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return
+
+    if item is None:
+        typer.echo("No matching SQLite memory item found.")
+        return
+
+    typer.echo(f"Applied feedback: {feedback}")
+    typer.echo(f"Updated memory status: {item['status']}")
+    typer.echo(f"Confidence: {item['confidence']}")
+    typer.echo(f"Claim: {item['claim']}")
+
+
+def _handle_memory_detect_feedback(
+    root: Path,
+    text: str,
+    status: str | None,
+    yes: bool,
+    json_output: bool,
+) -> None:
+    detected = detect_user_feedback(text)
+    item = None
+    if detected is not None and yes:
+        item = apply_memory_feedback(root, detected, status=status)
+
+    if json_output:
+        typer.echo(
+            json.dumps(
+                {
+                    "action": "detect_feedback",
+                    "detected_feedback": detected,
+                    "dry_run": not yes,
+                    "status_filter": status,
+                    "updated": item is not None,
+                    "item": item,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return
+
+    if detected is None:
+        typer.echo("Detected feedback: none")
+        typer.echo("No memory updated.")
+        return
+
+    typer.echo(f"Detected feedback: {detected}")
+    if not yes:
+        typer.echo("Dry run: no memory updated.")
+        typer.echo("Re-run with --yes to apply this feedback.")
+        return
+
+    if item is None:
+        typer.echo("No matching SQLite memory item found.")
+        return
+
+    typer.echo(f"Updated memory status: {item['status']}")
+    typer.echo(f"Confidence: {item['confidence']}")
+    typer.echo(f"Claim: {item['claim']}")
+
+
+def _handle_memory_reset(
+    root: Path,
+    raw_record_count: int,
+    memory_item_count: int,
+    include_raw: bool,
+    yes: bool,
+    json_output: bool,
+) -> None:
+    if json_output:
+        deleted = (
+            reset_memory(root, include_raw=include_raw)
+            if yes
+            else {"sqlite_items": 0, "raw_records": 0}
+        )
+        typer.echo(
+            json.dumps(
+                {
+                    "action": "reset",
+                    "dry_run": not yes,
+                    "include_raw": include_raw,
+                    "sqlite_items": memory_item_count,
+                    "raw_memory_records": raw_record_count,
+                    "deleted_sqlite_items": deleted["sqlite_items"],
+                    "deleted_raw_records": deleted["raw_records"],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return
+
+    if not yes:
+        typer.echo("Dry run: no memory reset.")
+        typer.echo(f"SQLite memory items that would be deleted: {memory_item_count}")
+        typer.echo(
+            "Raw memory records that would be deleted: "
+            f"{raw_record_count if include_raw else 0}"
+        )
+        if not include_raw:
+            typer.echo("Raw JSONL audit log would be kept.")
+        typer.echo("Re-run with --yes to reset memory.")
+        return
+
+    deleted = reset_memory(root, include_raw=include_raw)
+    typer.echo(f"Deleted SQLite memory items: {deleted['sqlite_items']}")
+    if include_raw:
+        typer.echo(f"Deleted raw memory records: {deleted['raw_records']}")
+    else:
+        typer.echo("Raw JSONL audit log kept.")
 
 
 def _print_memory_group(
@@ -617,6 +905,12 @@ def code(
         "--dry-run",
         help="Print the proposed patch without applying it.",
     ),
+    context_budget: int = typer.Option(
+        DEFAULT_CONTEXT_BUDGET_TOKENS,
+        "--context-budget",
+        min=1,
+        help="Approximate token budget for selected file contents.",
+    ),
     trace: bool = typer.Option(
         False,
         "--trace",
@@ -632,7 +926,9 @@ def code(
     config = _load_config_or_exit(env_file)
     resolved_trace_level = _resolve_trace_level(trace, trace_level)
     user_prompt, repository_context = _build_user_prompt_with_context(
-        "Change request", task
+        "Change request",
+        task,
+        context_budget_tokens=context_budget,
     )
     if _trace_enabled(resolved_trace_level):
         _print_trace("code", repository_context, config, resolved_trace_level)
@@ -800,7 +1096,15 @@ def code(
 
 @app.command("eval")
 def eval_command(
-    spec_path: Path = typer.Argument(..., help="Path to an eval JSON file."),
+    target: str = typer.Argument(
+        ...,
+        help="Path to an eval JSON file, or task text when --mode is provided.",
+    ),
+    mode: str | None = typer.Option(
+        None,
+        "--mode",
+        help="Run an ad-hoc eval with mode: ask, plan, or code.",
+    ),
     output_dir: Path = typer.Option(
         Path("eval-results"),
         "--output-dir",
@@ -811,22 +1115,64 @@ def eval_command(
         "--env-file",
         help="Optional path to a .env file.",
     ),
+    context_budget: int = typer.Option(
+        DEFAULT_CONTEXT_BUDGET_TOKENS,
+        "--context-budget",
+        min=1,
+        help="Approximate token budget for selected file contents.",
+    ),
+    show_context: bool = typer.Option(
+        False,
+        "--show-context",
+        help="Print context selection reasons before running the eval.",
+    ),
+    expect: list[str] | None = typer.Option(
+        None,
+        "--expect",
+        help="Expected term that should appear in the eval response. Repeatable.",
+    ),
+    forbid: list[str] | None = typer.Option(
+        None,
+        "--forbid",
+        help="Forbidden term that should not appear in the eval response. Repeatable.",
+    ),
 ) -> None:
     """Run one eval task and write a structured result."""
     config = _load_config_or_exit(env_file)
 
-    try:
-        spec = load_eval_spec(spec_path)
-    except EvalSpecError as exc:
-        typer.secho(str(exc), fg=typer.colors.RED, err=True)
-        raise typer.Exit(code=2) from exc
+    if mode is None:
+        try:
+            spec = load_eval_spec(Path(target))
+        except EvalSpecError as exc:
+            typer.secho(str(exc), fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=2) from exc
+    else:
+        if mode not in {"ask", "plan", "code"}:
+            typer.secho(
+                "Eval mode must be one of: ask, plan, code.",
+                fg=typer.colors.RED,
+                err=True,
+            )
+            raise typer.Exit(code=2)
+        spec = EvalSpec(
+            name=_ad_hoc_eval_name(mode, target),
+            mode=mode,  # type: ignore[arg-type]
+            task=target.strip(),
+            expected_terms=expect,
+            forbidden_terms=forbid,
+        )
 
     if spec.validation_command is not None:
         config = config.model_copy(
             update={"validation_command": spec.validation_command}
         )
 
-    result = _run_eval(spec, config)
+    result = _run_eval(
+        spec,
+        config,
+        context_budget_tokens=context_budget,
+        show_context=show_context,
+    )
     result_path = write_eval_result(result, output_dir)
     _record_memory(
         mode=f"eval:{spec.mode}",
@@ -847,17 +1193,184 @@ def eval_command(
     typer.echo(f"Mode: {spec.mode}")
     typer.echo(f"Status: {result['status']}")
     typer.echo(f"Success: {result['success']}")
+    if result.get("score") is not None:
+        score = result["score"]
+        typer.echo(
+            "Score: "
+            f"{score['passed_checks']}/{score['total_checks']} "
+            f"(passed={score['passed']})"
+        )
     typer.echo(f"Result file: {result_path}")
 
     if not result["success"]:
         raise typer.Exit(code=1)
 
 
-def _run_eval(spec: EvalSpec, config) -> dict:
+@app.command("eval-report")
+def eval_report_command(
+    output_dir: Path = typer.Option(
+        Path("eval-results"),
+        "--output-dir",
+        help="Directory containing eval result JSON files.",
+    ),
+    name: str | None = typer.Option(
+        None,
+        "--name",
+        help="Only include evals whose name contains this text.",
+    ),
+    limit: int = typer.Option(
+        10,
+        "--limit",
+        min=1,
+        help="Maximum number of result files to show.",
+    ),
+    json_output: bool = typer.Option(
+        False,
+        "--json",
+        help="Print machine-readable JSON.",
+    ),
+) -> None:
+    """Summarize saved eval results without calling a model."""
+    summaries = _load_eval_result_summaries(output_dir, name=name, limit=limit)
+
+    if json_output:
+        typer.echo(json.dumps(summaries, indent=2, sort_keys=True))
+        return
+
+    if not summaries:
+        typer.echo(f"No eval results found in {output_dir}.")
+        return
+
+    typer.echo(f"Eval results: {output_dir}")
+    typer.echo(f"Showing: {len(summaries)}")
+    typer.echo("")
+    for summary in summaries:
+        typer.echo(f"- {summary['file']}")
+        typer.echo(f"  name: {summary['name']}")
+        typer.echo(f"  mode: {summary['mode']}")
+        typer.echo(f"  status: {summary['status']}")
+        typer.echo(f"  success: {summary['success']}")
+        if summary["score"] is not None:
+            typer.echo(f"  score: {summary['score']}")
+        typer.echo(
+            "  tokens: "
+            f"input={summary['input_tokens']} "
+            f"output={summary['output_tokens']} "
+            f"total={summary['total_tokens']}"
+        )
+        typer.echo(f"  cost: {summary['estimated_cost']}")
+        typer.echo(f"  selected files: {summary['selected_file_count']}")
+        typer.echo(f"  changed files: {summary['changed_file_count']}")
+
+
+def _load_eval_result_summaries(
+    output_dir: Path,
+    name: str | None = None,
+    limit: int = 10,
+) -> list[dict]:
+    if not output_dir.exists():
+        return []
+
+    summaries = []
+    for path in sorted(
+        output_dir.glob("*.json"), key=lambda item: item.name, reverse=True
+    ):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+
+        eval_name = str(data.get("name", ""))
+        if name is not None and name not in eval_name:
+            continue
+        summaries.append(_eval_result_summary(path, data))
+        if len(summaries) >= limit:
+            break
+
+    return summaries
+
+
+def _eval_result_summary(path: Path, data: dict) -> dict:
+    usage = _eval_result_usage(data)
+    score = data.get("score")
+    return {
+        "file": path.name,
+        "name": data.get("name", "(unknown)"),
+        "mode": data.get("mode", "(unknown)"),
+        "status": data.get("status", "(unknown)"),
+        "success": data.get("success", False),
+        "score": _format_eval_score(score) if score is not None else None,
+        "input_tokens": usage["input_tokens"],
+        "output_tokens": usage["output_tokens"],
+        "total_tokens": usage["total_tokens"],
+        "estimated_cost": usage["estimated_cost"],
+        "selected_file_count": len(data.get("selected_files") or []),
+        "changed_file_count": len(data.get("changed_files") or []),
+    }
+
+
+def _eval_result_usage(data: dict) -> dict:
+    input_tokens = 0
+    output_tokens = 0
+    total_tokens = 0
+    cost_values = []
+
+    for call in data.get("model_calls") or []:
+        usage = call.get("usage") or {}
+        input_tokens += int(usage.get("input_tokens") or 0)
+        output_tokens += int(usage.get("output_tokens") or 0)
+        total_tokens += int(usage.get("total_tokens") or 0)
+        cost_value = _parse_cost_value(usage.get("estimated_cost"))
+        if cost_value is not None:
+            cost_values.append(cost_value)
+
+    estimated_cost = f"${sum(cost_values):.6f}" if cost_values else "(not available)"
+    return {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": total_tokens,
+        "estimated_cost": estimated_cost,
+    }
+
+
+def _parse_cost_value(value) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if not isinstance(value, str):
+        return None
+
+    normalized = value.strip()
+    if normalized.startswith("$"):
+        normalized = normalized[1:]
+    try:
+        return float(normalized)
+    except ValueError:
+        return None
+
+
+def _format_eval_score(score: dict) -> str:
+    return (
+        f"{score.get('passed_checks', 0)}/{score.get('total_checks', 0)} "
+        f"passed={score.get('passed', False)}"
+    )
+
+
+def _run_eval(
+    spec: EvalSpec,
+    config,
+    context_budget_tokens: int = DEFAULT_CONTEXT_BUDGET_TOKENS,
+    show_context: bool = False,
+) -> dict:
     mode_details = _mode_details(spec.mode)
     user_prompt, repository_context = _build_user_prompt_with_context(
-        mode_details["task_label"], spec.task
+        mode_details["task_label"],
+        spec.task,
+        context_budget_tokens=context_budget_tokens,
     )
+    if show_context:
+        _print_context_selection(repository_context)
     selected_files = repository_context.decision.selected_files
     model_calls = []
 
@@ -903,6 +1416,12 @@ def _run_eval(spec: EvalSpec, config) -> dict:
         selected_files=selected_files,
         model_calls=model_calls,
     )
+
+
+def _ad_hoc_eval_name(mode: str, task: str) -> str:
+    terms = task_terms(task)
+    suffix = "-".join(terms[:6]) if terms else "task"
+    return f"ad-hoc-{mode}-{suffix}"
 
 
 def _run_code_eval(
@@ -1165,7 +1684,42 @@ def _base_eval_result(
     if error is not None:
         result["error"] = error
 
+    score = _score_eval_response(spec, response)
+    if score is not None:
+        result["score"] = score
+
     return result
+
+
+def _score_eval_response(spec: EvalSpec, response: str) -> dict | None:
+    expected_terms = spec.expected_terms or []
+    forbidden_terms = spec.forbidden_terms or []
+    if not expected_terms and not forbidden_terms:
+        return None
+
+    lowered_response = response.lower()
+    missing_expected = [
+        term for term in expected_terms if term.lower() not in lowered_response
+    ]
+    present_forbidden = [
+        term for term in forbidden_terms if term.lower() in lowered_response
+    ]
+    passed_checks = (
+        len(expected_terms)
+        - len(missing_expected)
+        + len(forbidden_terms)
+        - len(present_forbidden)
+    )
+    total_checks = len(expected_terms) + len(forbidden_terms)
+    return {
+        "passed": not missing_expected and not present_forbidden,
+        "passed_checks": passed_checks,
+        "total_checks": total_checks,
+        "expected_terms": expected_terms,
+        "missing_expected_terms": missing_expected,
+        "forbidden_terms": forbidden_terms,
+        "present_forbidden_terms": present_forbidden,
+    }
 
 
 def _print_patch_summary(summary) -> None:

@@ -2,12 +2,16 @@ import json
 
 from agent_zero.memory import (
     append_memory_record,
+    apply_memory_feedback,
     build_reflection,
     classify_memory_candidate,
+    delete_memory_items,
+    detect_user_feedback,
     load_memory,
     load_memory_items,
     memory_file_scores,
     memory_item_scores,
+    reset_memory,
     write_memory_candidate,
 )
 
@@ -274,3 +278,127 @@ def test_write_memory_candidate_stores_sqlite_item(tmp_path):
     assert items[0]["task_terms"] == ["bedrock", "gateway"]
     assert items[0]["useful_files"] == ["agent_zero/model_client.py"]
     assert items[0]["use_count"] == 2
+
+
+def test_delete_memory_items_removes_rejected_but_keeps_confirmed(tmp_path):
+    write_memory_candidate(
+        tmp_path,
+        {
+            "mode": "code",
+            "task_terms": ["bedrock"],
+            "changed_files": ["agent_zero/model_client.py"],
+            "status": "validation_passed",
+            "success": True,
+            "validation_passed": True,
+        },
+    )
+    write_memory_candidate(
+        tmp_path,
+        {
+            "mode": "code",
+            "task_terms": ["readme"],
+            "status": "patch_failed",
+            "success": False,
+        },
+    )
+
+    deleted_count = delete_memory_items(tmp_path, {"rejected"})
+    items = load_memory_items(tmp_path)
+
+    assert deleted_count == 1
+    assert len(items) == 1
+    assert items[0]["status"] == "confirmed"
+
+
+def test_reset_memory_deletes_sqlite_and_can_keep_raw_log(tmp_path):
+    append_memory_record(
+        tmp_path,
+        {
+            "mode": "ask",
+            "task_terms": ["project"],
+            "selected_files": ["README.md"],
+            "status": "ask_completed",
+            "success": True,
+        },
+    )
+    write_memory_candidate(
+        tmp_path,
+        {
+            "mode": "code",
+            "task_terms": ["bedrock"],
+            "changed_files": ["agent_zero/model_client.py"],
+            "status": "validation_passed",
+            "success": True,
+            "validation_passed": True,
+        },
+    )
+
+    deleted = reset_memory(tmp_path)
+
+    assert deleted == {"sqlite_items": 1, "raw_records": 0}
+    assert load_memory_items(tmp_path) == []
+    assert len(load_memory(tmp_path)) == 1
+
+
+def test_reset_memory_can_delete_raw_log(tmp_path):
+    append_memory_record(
+        tmp_path,
+        {
+            "mode": "ask",
+            "task_terms": ["project"],
+            "selected_files": ["README.md"],
+            "status": "ask_completed",
+            "success": True,
+        },
+    )
+
+    deleted = reset_memory(tmp_path, include_raw=True)
+
+    assert deleted == {"sqlite_items": 0, "raw_records": 1}
+    assert load_memory(tmp_path) == []
+
+
+def test_apply_memory_feedback_promotes_latest_candidate(tmp_path):
+    write_memory_candidate(
+        tmp_path,
+        {
+            "mode": "ask",
+            "task_terms": ["bedrock"],
+            "status": "ask_completed",
+            "success": True,
+        },
+    )
+
+    item = apply_memory_feedback(tmp_path, "worked")
+
+    assert item is not None
+    assert item["status"] == "confirmed"
+    assert item["confidence"] == "high"
+
+
+def test_apply_memory_feedback_can_reject_confirmed_item(tmp_path):
+    write_memory_candidate(
+        tmp_path,
+        {
+            "mode": "code",
+            "task_terms": ["bedrock"],
+            "changed_files": ["agent_zero/model_client.py"],
+            "status": "validation_passed",
+            "success": True,
+            "validation_passed": True,
+        },
+    )
+
+    item = apply_memory_feedback(tmp_path, "failed", status="confirmed")
+
+    assert item is not None
+    assert item["status"] == "rejected"
+    assert item["confidence"] == "low"
+
+
+def test_detect_user_feedback_recognizes_clear_phrases():
+    assert detect_user_feedback("it worked") == "worked"
+    assert detect_user_feedback("That fixed it") == "worked"
+    assert detect_user_feedback("did not work") == "failed"
+    assert detect_user_feedback("issue still exists") == "failed"
+    assert detect_user_feedback("let us move to the next task") is None

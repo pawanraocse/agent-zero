@@ -5,7 +5,12 @@ from typer.testing import CliRunner
 
 from agent_zero import cli
 from agent_zero.cli import app
-from agent_zero.memory import append_memory_record, load_memory_items, write_memory_candidate
+from agent_zero.memory import (
+    append_memory_record,
+    load_memory,
+    load_memory_items,
+    write_memory_candidate,
+)
 from agent_zero.tools.command_tool import CommandResult
 from agent_zero.model_client import ModelClientError, ModelResponse
 
@@ -708,10 +713,16 @@ def test_memory_command_groups_raw_and_curated_memory(tmp_path, monkeypatch):
     assert "Raw memory records: 1" in result.output
     assert "SQLite memory items: 3" in result.output
     assert "Confirmed:" in result.output
-    assert "[high] code task with terms bedrock, gateway used agent_zero/model_client.py." in result.output
+    assert (
+        "[high] code task with terms bedrock, gateway used agent_zero/model_client.py."
+        in result.output
+    )
     assert "files: agent_zero/model_client.py" in result.output
     assert "Candidates:" in result.output
-    assert "[low] ask task with terms project completed without reusable file evidence." in result.output
+    assert (
+        "[low] ask task with terms project completed without reusable file evidence."
+        in result.output
+    )
     assert "Rejected:" in result.output
     assert "[low] code task with terms readme ended with patch_failed." in result.output
 
@@ -773,6 +784,348 @@ def test_memory_command_prints_json(tmp_path, monkeypatch):
     assert data["raw_memory_records"] == 0
     assert data["sqlite_memory_items"] == 1
     assert data["items"][0]["status"] == "confirmed"
+
+
+def test_memory_command_prune_rejected_dry_run_does_not_delete(tmp_path, monkeypatch):
+    write_memory_candidate(
+        tmp_path,
+        {
+            "mode": "code",
+            "task_terms": ["readme"],
+            "status": "patch_failed",
+            "success": False,
+        },
+    )
+    monkeypatch.chdir(tmp_path)
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["memory", "--prune"])
+
+    assert result.exit_code == 0
+    assert "Dry run: no memory deleted." in result.output
+    assert "Prunable rejected memory items: 1" in result.output
+    assert "Re-run with --yes" in result.output
+    assert load_memory_items(tmp_path)[0]["status"] == "rejected"
+
+
+def test_memory_command_prune_rejected_with_yes_deletes_only_rejected(
+    tmp_path, monkeypatch
+):
+    write_memory_candidate(
+        tmp_path,
+        {
+            "mode": "code",
+            "task_terms": ["bedrock"],
+            "changed_files": ["agent_zero/model_client.py"],
+            "status": "validation_passed",
+            "success": True,
+            "validation_passed": True,
+        },
+    )
+    write_memory_candidate(
+        tmp_path,
+        {
+            "mode": "code",
+            "task_terms": ["readme"],
+            "status": "patch_failed",
+            "success": False,
+        },
+    )
+    monkeypatch.chdir(tmp_path)
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["memory", "--prune", "--yes"])
+
+    assert result.exit_code == 0
+    assert "Deleted rejected memory items: 1" in result.output
+    assert "Confirmed memory kept." in result.output
+    items = load_memory_items(tmp_path)
+    assert len(items) == 1
+    assert items[0]["status"] == "confirmed"
+
+
+def test_memory_command_refuses_to_prune_confirmed(tmp_path, monkeypatch):
+    write_memory_candidate(
+        tmp_path,
+        {
+            "mode": "code",
+            "task_terms": ["bedrock"],
+            "changed_files": ["agent_zero/model_client.py"],
+            "status": "validation_passed",
+            "success": True,
+            "validation_passed": True,
+        },
+    )
+    monkeypatch.chdir(tmp_path)
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["memory", "--prune", "--status", "confirmed", "--yes"])
+
+    assert result.exit_code == 2
+    assert "Refusing to prune confirmed memory" in result.output
+    assert load_memory_items(tmp_path)[0]["status"] == "confirmed"
+
+
+def test_memory_command_reset_dry_run_does_not_delete(tmp_path, monkeypatch):
+    append_memory_record(
+        tmp_path,
+        {
+            "mode": "ask",
+            "task_terms": ["project"],
+            "selected_files": ["README.md"],
+            "status": "ask_completed",
+            "success": True,
+        },
+    )
+    write_memory_candidate(
+        tmp_path,
+        {
+            "mode": "code",
+            "task_terms": ["bedrock"],
+            "changed_files": ["agent_zero/model_client.py"],
+            "status": "validation_passed",
+            "success": True,
+            "validation_passed": True,
+        },
+    )
+    monkeypatch.chdir(tmp_path)
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["memory", "--reset"])
+
+    assert result.exit_code == 0
+    assert "Dry run: no memory reset." in result.output
+    assert "SQLite memory items that would be deleted: 1" in result.output
+    assert "Raw JSONL audit log would be kept." in result.output
+    assert len(load_memory_items(tmp_path)) == 1
+
+
+def test_memory_command_reset_with_yes_deletes_sqlite_only(tmp_path, monkeypatch):
+    append_memory_record(
+        tmp_path,
+        {
+            "mode": "ask",
+            "task_terms": ["project"],
+            "selected_files": ["README.md"],
+            "status": "ask_completed",
+            "success": True,
+        },
+    )
+    write_memory_candidate(
+        tmp_path,
+        {
+            "mode": "code",
+            "task_terms": ["bedrock"],
+            "changed_files": ["agent_zero/model_client.py"],
+            "status": "validation_passed",
+            "success": True,
+            "validation_passed": True,
+        },
+    )
+    monkeypatch.chdir(tmp_path)
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["memory", "--reset", "--yes"])
+
+    assert result.exit_code == 0
+    assert "Deleted SQLite memory items: 1" in result.output
+    assert "Raw JSONL audit log kept." in result.output
+    assert load_memory_items(tmp_path) == []
+    assert len(load_memory(tmp_path)) == 1
+
+
+def test_memory_command_reset_include_raw_deletes_jsonl(tmp_path, monkeypatch):
+    append_memory_record(
+        tmp_path,
+        {
+            "mode": "ask",
+            "task_terms": ["project"],
+            "selected_files": ["README.md"],
+            "status": "ask_completed",
+            "success": True,
+        },
+    )
+    monkeypatch.chdir(tmp_path)
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["memory", "--reset", "--include-raw", "--yes"])
+
+    assert result.exit_code == 0
+    assert "Deleted SQLite memory items: 0" in result.output
+    assert "Deleted raw memory records: 1" in result.output
+    assert load_memory(tmp_path) == []
+
+
+def test_memory_command_reset_json_dry_run(tmp_path, monkeypatch):
+    write_memory_candidate(
+        tmp_path,
+        {
+            "mode": "code",
+            "task_terms": ["bedrock"],
+            "changed_files": ["agent_zero/model_client.py"],
+            "status": "validation_passed",
+            "success": True,
+            "validation_passed": True,
+        },
+    )
+    monkeypatch.chdir(tmp_path)
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["memory", "--reset", "--json"])
+
+    assert result.exit_code == 0
+    data = json.loads(result.output)
+    assert data["action"] == "reset"
+    assert data["dry_run"] is True
+    assert data["sqlite_items"] == 1
+    assert data["deleted_sqlite_items"] == 0
+
+
+def test_memory_command_feedback_worked_promotes_latest_item(tmp_path, monkeypatch):
+    write_memory_candidate(
+        tmp_path,
+        {
+            "mode": "ask",
+            "task_terms": ["bedrock"],
+            "status": "ask_completed",
+            "success": True,
+        },
+    )
+    monkeypatch.chdir(tmp_path)
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["memory", "--feedback", "worked"])
+
+    assert result.exit_code == 0
+    assert "Applied feedback: worked" in result.output
+    assert "Updated memory status: confirmed" in result.output
+    item = load_memory_items(tmp_path)[0]
+    assert item["status"] == "confirmed"
+    assert item["confidence"] == "high"
+
+
+def test_memory_command_feedback_failed_with_status_filter(tmp_path, monkeypatch):
+    write_memory_candidate(
+        tmp_path,
+        {
+            "mode": "code",
+            "task_terms": ["bedrock"],
+            "changed_files": ["agent_zero/model_client.py"],
+            "status": "validation_passed",
+            "success": True,
+            "validation_passed": True,
+        },
+    )
+    monkeypatch.chdir(tmp_path)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        ["memory", "--status", "confirmed", "--feedback", "failed"],
+    )
+
+    assert result.exit_code == 0
+    assert "Applied feedback: failed" in result.output
+    assert "Updated memory status: rejected" in result.output
+    item = load_memory_items(tmp_path)[0]
+    assert item["status"] == "rejected"
+    assert item["confidence"] == "low"
+
+
+def test_memory_command_feedback_prints_json(tmp_path, monkeypatch):
+    write_memory_candidate(
+        tmp_path,
+        {
+            "mode": "ask",
+            "task_terms": ["bedrock"],
+            "status": "ask_completed",
+            "success": True,
+        },
+    )
+    monkeypatch.chdir(tmp_path)
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["memory", "--feedback", "worked", "--json"])
+
+    assert result.exit_code == 0
+    data = json.loads(result.output)
+    assert data["action"] == "feedback"
+    assert data["feedback"] == "worked"
+    assert data["updated"] is True
+    assert data["item"]["status"] == "confirmed"
+
+
+def test_memory_command_rejects_feedback_with_prune(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["memory", "--feedback", "worked", "--prune"])
+
+    assert result.exit_code == 2
+    assert "--feedback cannot be combined" in result.output
+
+
+def test_memory_command_detect_feedback_dry_run(tmp_path, monkeypatch):
+    write_memory_candidate(
+        tmp_path,
+        {
+            "mode": "ask",
+            "task_terms": ["bedrock"],
+            "status": "ask_completed",
+            "success": True,
+        },
+    )
+    monkeypatch.chdir(tmp_path)
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["memory", "--detect-feedback", "it worked"])
+
+    assert result.exit_code == 0
+    assert "Detected feedback: worked" in result.output
+    assert "Dry run: no memory updated." in result.output
+    assert load_memory_items(tmp_path)[0]["status"] == "candidate"
+
+
+def test_memory_command_detect_feedback_with_yes_applies_feedback(
+    tmp_path, monkeypatch
+):
+    write_memory_candidate(
+        tmp_path,
+        {
+            "mode": "ask",
+            "task_terms": ["bedrock"],
+            "status": "ask_completed",
+            "success": True,
+        },
+    )
+    monkeypatch.chdir(tmp_path)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        ["memory", "--detect-feedback", "it worked", "--yes"],
+    )
+
+    assert result.exit_code == 0
+    assert "Detected feedback: worked" in result.output
+    assert "Updated memory status: confirmed" in result.output
+    assert load_memory_items(tmp_path)[0]["status"] == "confirmed"
+
+
+def test_memory_command_detect_feedback_json_no_match(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        ["memory", "--detect-feedback", "move to next task", "--json"],
+    )
+
+    assert result.exit_code == 0
+    data = json.loads(result.output)
+    assert data["action"] == "detect_feedback"
+    assert data["detected_feedback"] is None
+    assert data["updated"] is False
 
 
 def test_eval_command_runs_ask_eval_and_writes_result(tmp_path, monkeypatch):
@@ -838,6 +1191,259 @@ def test_eval_command_runs_ask_eval_and_writes_result(tmp_path, monkeypatch):
     assert data["status"] == "ask_completed"
     assert data["model_calls"][0]["usage"]["input_tokens"] == 100
     assert data["model_calls"][0]["usage"]["estimated_cost"] == "$0.000200"
+
+
+def test_eval_command_runs_ad_hoc_ask_eval_and_writes_result(tmp_path, monkeypatch):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "AGENT_ZERO_BASE_URL=http://localhost:1234/v1",
+                "AGENT_ZERO_API_KEY=test-key",
+                "AGENT_ZERO_MODEL=test-model",
+                "AGENT_ZERO_INPUT_COST_PER_1M_TOKENS=1.0",
+                "AGENT_ZERO_OUTPUT_COST_PER_1M_TOKENS=2.0",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "README.md").write_text("# Agent Zero\n", encoding="utf-8")
+    output_dir = tmp_path / "eval-results"
+    fake_client = FakeModelClient(
+        ModelResponse(
+            content="Bedrock gateway uses polling with AWS SDK.",
+            input_tokens=100,
+            output_tokens=50,
+            total_tokens=150,
+        )
+    )
+    monkeypatch.setattr(cli, "create_model_client", lambda config: fake_client)
+    monkeypatch.chdir(tmp_path)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        [
+            "eval",
+            "--mode",
+            "ask",
+            "Explain Bedrock gateway",
+            "--expect",
+            "polling",
+            "--expect",
+            "Bedrock",
+            "--forbid",
+            "AWS SDK",
+            "--show-context",
+            "--context-budget",
+            "10",
+            "--output-dir",
+            str(output_dir),
+            "--env-file",
+            str(env_file),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "Context selection:" in result.output
+    assert "Context budget: 10 tokens" in result.output
+    assert "Eval: ad-hoc-ask-explain-bedrock-gateway" in result.output
+    assert "Success: True" in result.output
+    assert "Score: 2/3 (passed=False)" in result.output
+
+    result_files = list(output_dir.glob("*-ad-hoc-ask-explain-bedrock-gateway.json"))
+    assert len(result_files) == 1
+    data = json.loads(result_files[0].read_text(encoding="utf-8"))
+    assert data["name"] == "ad-hoc-ask-explain-bedrock-gateway"
+    assert data["mode"] == "ask"
+    assert data["task"] == "Explain Bedrock gateway"
+    assert data["success"] is True
+    assert data["status"] == "ask_completed"
+    assert data["score"] == {
+        "expected_terms": ["polling", "Bedrock"],
+        "forbidden_terms": ["AWS SDK"],
+        "missing_expected_terms": [],
+        "passed": False,
+        "passed_checks": 2,
+        "present_forbidden_terms": ["AWS SDK"],
+        "total_checks": 3,
+    }
+
+
+def test_eval_command_rejects_invalid_ad_hoc_mode(tmp_path, monkeypatch):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "AGENT_ZERO_BASE_URL=http://localhost:1234/v1",
+                "AGENT_ZERO_API_KEY=test-key",
+                "AGENT_ZERO_MODEL=test-model",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        [
+            "eval",
+            "--mode",
+            "bad",
+            "Explain Bedrock gateway",
+            "--env-file",
+            str(env_file),
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "Eval mode must be one of: ask, plan, code." in result.output
+
+
+def test_eval_report_command_summarizes_saved_results(tmp_path):
+    output_dir = tmp_path / "eval-results"
+    output_dir.mkdir()
+    result_file = output_dir / "20260623T170918Z-ad-hoc-ask-explain-bedrock.json"
+    result_file.write_text(
+        json.dumps(
+            {
+                "name": "ad-hoc-ask-explain-bedrock",
+                "mode": "ask",
+                "status": "ask_completed",
+                "success": True,
+                "selected_files": ["agent_zero/model_client.py", "README.md"],
+                "changed_files": [],
+                "score": {
+                    "passed": True,
+                    "passed_checks": 2,
+                    "total_checks": 2,
+                },
+                "model_calls": [
+                    {
+                        "purpose": "initial",
+                        "usage": {
+                            "input_tokens": 100,
+                            "output_tokens": 50,
+                            "total_tokens": 150,
+                            "estimated_cost": "$0.000200",
+                        },
+                    },
+                    {
+                        "purpose": "retry",
+                        "usage": {
+                            "input_tokens": 20,
+                            "output_tokens": 10,
+                            "total_tokens": 30,
+                            "estimated_cost": "$0.000040",
+                        },
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        ["eval-report", "--output-dir", str(output_dir)],
+    )
+
+    assert result.exit_code == 0
+    assert "Eval results:" in result.output
+    assert "20260623T170918Z-ad-hoc-ask-explain-bedrock.json" in result.output
+    assert "name: ad-hoc-ask-explain-bedrock" in result.output
+    assert "score: 2/2 passed=True" in result.output
+    assert "tokens: input=120 output=60 total=180" in result.output
+    assert "cost: $0.000240" in result.output
+    assert "selected files: 2" in result.output
+    assert "changed files: 0" in result.output
+
+
+def test_eval_report_command_filters_by_name(tmp_path):
+    output_dir = tmp_path / "eval-results"
+    output_dir.mkdir()
+    for filename, name in [
+        ("20260623T170918Z-keep-this.json", "keep-this"),
+        ("20260623T170917Z-skip-this.json", "skip-this"),
+    ]:
+        (output_dir / filename).write_text(
+            json.dumps(
+                {
+                    "name": name,
+                    "mode": "ask",
+                    "status": "ask_completed",
+                    "success": True,
+                    "model_calls": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        ["eval-report", "--output-dir", str(output_dir), "--name", "keep"],
+    )
+
+    assert result.exit_code == 0
+    assert "name: keep-this" in result.output
+    assert "skip-this" not in result.output
+
+
+def test_eval_report_command_prints_json(tmp_path):
+    output_dir = tmp_path / "eval-results"
+    output_dir.mkdir()
+    (output_dir / "20260623T170918Z-report-json.json").write_text(
+        json.dumps(
+            {
+                "name": "report-json",
+                "mode": "ask",
+                "status": "ask_completed",
+                "success": True,
+                "selected_files": ["README.md"],
+                "changed_files": [],
+                "model_calls": [
+                    {
+                        "purpose": "initial",
+                        "usage": {
+                            "input_tokens": 10,
+                            "output_tokens": 5,
+                            "total_tokens": 15,
+                            "estimated_cost": "$0.000020",
+                        },
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        ["eval-report", "--output-dir", str(output_dir), "--json"],
+    )
+
+    assert result.exit_code == 0
+    data = json.loads(result.output)
+    assert data == [
+        {
+            "changed_file_count": 0,
+            "estimated_cost": "$0.000020",
+            "file": "20260623T170918Z-report-json.json",
+            "input_tokens": 10,
+            "mode": "ask",
+            "name": "report-json",
+            "output_tokens": 5,
+            "score": None,
+            "selected_file_count": 1,
+            "status": "ask_completed",
+            "success": True,
+            "total_tokens": 15,
+        }
+    ]
 
 
 def test_eval_command_runs_code_eval_and_writes_validation_result(
@@ -975,6 +1581,53 @@ diff --git a/hello.txt b/hello.txt
     system_prompt, user_prompt = fake_client.calls[0]
     assert system_prompt == cli.CODE_SYSTEM_PROMPT
     assert "Change request:\nChange old to new" in user_prompt
+
+
+def test_code_command_accepts_context_budget(tmp_path, monkeypatch):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "AGENT_ZERO_BASE_URL=http://localhost:1234/v1",
+                "AGENT_ZERO_API_KEY=test-key",
+                "AGENT_ZERO_MODEL=test-model",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "README.md").write_text("a" * 120, encoding="utf-8")
+    fake_client = FakeModelClient(
+        ModelResponse(
+            content="""diff --git a/README.md b/README.md
+--- a/README.md
++++ b/README.md
+@@ -1 +1 @@
+-old
++new
+"""
+        )
+    )
+    monkeypatch.setattr(cli, "create_model_client", lambda config: fake_client)
+    monkeypatch.chdir(tmp_path)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        [
+            "code",
+            "Update README.md",
+            "--context-budget",
+            "10",
+            "--dry-run",
+            "--trace",
+            "--env-file",
+            str(env_file),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "Applied context budget: 10 tokens" in result.output
+    assert "### README.md (truncated)" in fake_client.calls[0][1]
 
 
 def test_code_command_dry_run_prints_patch_without_changing_files(

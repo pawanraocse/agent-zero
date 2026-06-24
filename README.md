@@ -7,6 +7,8 @@ like Claude Code, Codex, Cursor, and other agentic coding systems work under
 the hood. It is not trying to be the most powerful agent. It is trying to be
 the clearest one.
 
+**Note:** This is a learning project first. It prioritizes clarity and visibility over production features.
+
 The project intentionally keeps the core loop simple:
 
 1. Read the user request.
@@ -93,7 +95,7 @@ that direction.
 
 Completed:
 
-- CLI modes: `ask`, `plan`, `code`, `eval`, and `index`.
+- CLI modes: `ask`, `plan`, `code`, `eval`, `eval-report`, and `index`.
 - Providers: OpenAI-compatible APIs and an async Bedrock gateway.
 - Repository retrieval: file listing, text search, repo index, learning memory,
   confirmed SQLite memory, target-file narrowing, and relevance explanations.
@@ -105,16 +107,17 @@ Completed:
 - Validation: single validation command or layered test, lint, and format
   commands.
 - Observability: `--show-context`, `--trace`, `--trace-level`, patch summaries,
-  changed Python symbols, token usage, and cost output.
+  changed Python symbols, token usage, cost output, eval reports, and memory
+  inspection.
 - Local learning: `.agent-zero/memory.jsonl`, reflection records, confidence
   labels, duplicate compaction, memory hygiene, SQLite memory candidates, and
   confirmed-memory retrieval boosts.
+- Memory maintenance: inspect memory, dry-run pruning, and confirmed deletion of
+  low-value rejected/candidate memory, plus explicit memory reset.
 
 Pending:
 
 - Semantic memory retrieval using embeddings or a graph index.
-- A memory inspection command, for example `python -m agent_zero memory`.
-- Memory pruning or reset commands for local hygiene.
 - Stronger eval suites that repeatedly test ask, plan, code, retries, Bedrock,
   and memory behavior.
 - Better language support for changed-symbol summaries beyond Python.
@@ -123,8 +126,13 @@ Pending:
 
 Recommended next milestone:
 
-> Add a memory inspection command so learners can see raw JSONL records,
-> SQLite candidates, confirmed lessons, and rejected lessons from the CLI.
+> Add stronger eval suites that repeatedly test ask, plan, code, retries,
+> Bedrock, and memory behavior.
+
+Detailed roadmap:
+
+- See `docs/project-todo.md` for the full implementation and testing TODO.
+- See `docs/testing-plan.md` for a step-by-step manual testing lab.
 
 ### Why Two Memory Stores?
 
@@ -418,6 +426,128 @@ debugging but does not automatically mark them as useful. Strong usefulness
 signals come from changed files and successful validation in `code` and `eval`
 runs.
 
+### Memory Mode
+
+Use `memory` to inspect raw and curated local memory:
+
+```bash
+python -m agent_zero memory
+```
+
+Example output:
+
+```text
+Raw memory records: 5
+SQLite memory items: 3
+
+Confirmed:
+- [high] code task with terms bedrock, gateway used agent_zero/model_client.py.
+  files: agent_zero/model_client.py
+  use_count: 2
+
+Candidates:
+- [low] ask task with terms project completed without reusable file evidence.
+  use_count: 1
+
+Rejected:
+- [low] code task with terms readme ended with patch_failed.
+  use_count: 1
+```
+
+Filter by status when you only want one memory class:
+
+```bash
+python -m agent_zero memory --status confirmed
+python -m agent_zero memory --status candidate
+python -m agent_zero memory --status rejected
+```
+
+Use JSON output for scripts or deeper inspection:
+
+```bash
+python -m agent_zero memory --json
+```
+
+Prune rejected memory with a dry run first:
+
+```bash
+python -m agent_zero memory --prune
+```
+
+Then confirm deletion explicitly:
+
+```bash
+python -m agent_zero memory --prune --yes
+```
+
+You can prune candidate memory the same way:
+
+```bash
+python -m agent_zero memory --status candidate --prune
+python -m agent_zero memory --status candidate --prune --yes
+```
+
+Confirmed memory is protected and cannot be pruned with this command.
+
+Apply explicit user feedback to the latest matching memory item:
+
+```bash
+python -m agent_zero memory --feedback worked
+python -m agent_zero memory --feedback failed
+```
+
+Use `--status` when you want to target a specific memory class:
+
+```bash
+python -m agent_zero memory --status candidate --feedback worked
+python -m agent_zero memory --status confirmed --feedback failed
+```
+
+`worked` promotes the selected memory item to confirmed/high-confidence.
+`failed` marks it as rejected/low-confidence. The feedback is also recorded as a
+memory event.
+
+Detect feedback from a short phrase without applying it:
+
+```bash
+python -m agent_zero memory --detect-feedback "it worked"
+python -m agent_zero memory --detect-feedback "did not work"
+```
+
+This is a dry run by default. Add `--yes` to apply the detected feedback:
+
+```bash
+python -m agent_zero memory --detect-feedback "it worked" --yes
+```
+
+Feedback detection is intentionally conservative. It only recognizes clear
+phrases such as `it worked`, `that fixed it`, `did not work`, or
+`issue still exists`.
+
+Reset curated SQLite memory with a dry run first:
+
+```bash
+python -m agent_zero memory --reset
+```
+
+Then confirm the reset:
+
+```bash
+python -m agent_zero memory --reset --yes
+```
+
+By default, reset deletes only `.agent-zero/memory.db` and keeps the raw JSONL
+audit log. To delete the raw audit log too, make that explicit:
+
+```bash
+python -m agent_zero memory --reset --include-raw --yes
+```
+
+This command helps you see the difference between the raw run history in
+`.agent-zero/memory.jsonl` and the curated learning items in
+`.agent-zero/memory.db`. Pruning only removes selected SQLite memory items; it
+does not rewrite the raw audit log.
+
 ### Ask Mode
 
 Use `ask` for repo-aware questions without editing files.
@@ -606,6 +736,19 @@ Dry run behavior:
 
 This is useful when you want to separate patch generation from patch execution.
 
+Use `--context-budget` when code mode needs more exact file context, especially
+for larger documentation files where a focused excerpt may not contain enough
+patch anchor text:
+
+```bash
+python -m agent_zero code "Add a short README note" --context-budget 12000 --trace
+```
+
+The budget controls selected file contents before the model writes a patch. A
+larger budget lets an important selected file use more of the remaining context,
+which can make patch application more reliable, but it also increases token
+usage and cost.
+
 Use `--trace` when you want to see the full code loop:
 
 ```bash
@@ -623,6 +766,36 @@ context diagnostics before patch generation.
 Use `eval` when you want to run the same task repeatedly and compare behavior
 across models, prompts, or context changes.
 
+Run an ad-hoc eval directly from a prompt:
+
+```bash
+python -m agent_zero eval --mode ask "Explain Bedrock gateway"
+```
+
+This runs ask mode, saves a structured result under `eval-results/`, and lets
+you compare selected files, token usage, cost, status, and response over time.
+
+Use `--show-context` and `--context-budget` to make context experiments visible:
+
+```bash
+python -m agent_zero eval --mode ask "Explain Bedrock gateway" --show-context --context-budget 400
+```
+
+Add simple deterministic scoring with expected and forbidden terms:
+
+```bash
+python -m agent_zero eval --mode ask "Explain Bedrock gateway" \
+  --expect BedrockGatewayClient \
+  --expect polling \
+  --expect tenantId \
+  --forbid "AWS SDK"
+```
+
+This does not use a model judge. It checks the saved response text and records
+which expected terms were missing and which forbidden terms appeared.
+
+You can still run file-based evals for repeatable benchmark tasks:
+
 ```bash
 python -m agent_zero eval evals/ask-project.json
 ```
@@ -633,7 +806,9 @@ An eval file is small JSON:
 {
   "name": "ask-project-overview",
   "mode": "ask",
-  "task": "What does this project do?"
+  "task": "What does this project do?",
+  "expected_terms": ["Agent Zero", "learning project"],
+  "forbidden_terms": ["production assistant"]
 }
 ```
 
@@ -658,6 +833,11 @@ Agent Zero writes a timestamped JSON result under `eval-results/`:
   "status": "ask_completed",
   "provider": "bedrock",
   "model": "anthropic.claude-haiku-4-5-20251001-v1:0",
+  "score": {
+    "passed": true,
+    "passed_checks": 2,
+    "total_checks": 2
+  },
   "model_calls": [
     {
       "purpose": "initial",
@@ -676,6 +856,18 @@ Agent Zero writes a timestamped JSON result under `eval-results/`:
 For `code` evals, the result also records changed files, patch summary,
 validation output, and retry details when validation fails. Patch summaries are
 deterministic counts from the unified diff, not model-written prose.
+
+Summarize saved eval results without opening each JSON file:
+
+```bash
+python -m agent_zero eval-report
+python -m agent_zero eval-report --name ad-hoc-ask-explain-bedrock-gateway
+python -m agent_zero eval-report --json
+```
+
+`eval-report` shows the result file, eval name, mode, status, success, score,
+total tokens, estimated cost, selected file count, and changed file count. It
+does not call the model; it only reads saved `eval-results/*.json` files.
 
 This is the start of making Agent Zero measurable: same task, same repository,
 different model or prompt, comparable result.
@@ -1347,6 +1539,175 @@ Learning outcome:
   useful evidence, and let future context selection reuse that curated signal.
   Raw logs remain useful for audit and debugging; confirmed SQLite items are the
   safer retrieval signal.
+
+### Milestone 34: Memory Inspection Command
+
+Goal: make local memory inspectable from the CLI.
+
+Built:
+
+- A read-only `python -m agent_zero memory` command.
+- Raw memory counts from `.agent-zero/memory.jsonl`.
+- Curated memory counts from `.agent-zero/memory.db`.
+- Grouped display for confirmed, candidate, and rejected memory items.
+- Status filtering with `--status confirmed`, `--status candidate`, and
+  `--status rejected`.
+- Machine-readable output with `--json`.
+
+Learning outcome:
+
+- Agent memory should be observable. Before adding pruning, embeddings, or graph
+  retrieval, learners need a simple way to inspect what the agent recorded, what
+  it trusts, and what it refuses to use.
+
+### Milestone 35: Code Context Budget
+
+Goal: let code mode trade token cost for better patch context.
+
+Built:
+
+- `--context-budget` support for `python -m agent_zero code`.
+- Code trace output now reflects the requested budget.
+- Patch prompts receive the same budgeted repository context mechanism used by
+  ask and plan modes.
+- Selected files can use the remaining context budget instead of being limited
+  by a small fixed per-file cap.
+
+Learning outcome:
+
+- Patch reliability depends on exact surrounding context. When large files are
+  represented by narrow focused excerpts, the model may generate stale patch
+  anchors. A larger context budget can improve patch application at the cost of
+  more tokens.
+
+### Milestone 36: Memory Pruning
+
+Goal: clean low-value curated memory without risking confirmed lessons.
+
+Built:
+
+- `python -m agent_zero memory --prune` dry-runs rejected-memory cleanup.
+- `python -m agent_zero memory --prune --yes` deletes rejected SQLite memory.
+- `python -m agent_zero memory --status candidate --prune` previews candidate
+  cleanup.
+- Confirmed memory is protected from pruning.
+- JSON output can describe prune actions for scripts.
+
+Learning outcome:
+
+- Memory cleanup should be observable and conservative. Before automation, the
+  agent should show what it would delete, require explicit confirmation, and
+  protect confirmed lessons by default.
+
+### Milestone 37: Memory Reset
+
+Goal: reset local learning state without manually deleting generated files.
+
+Built:
+
+- `python -m agent_zero memory --reset` dry-runs curated memory reset.
+- `python -m agent_zero memory --reset --yes` deletes SQLite curated memory.
+- Raw `.agent-zero/memory.jsonl` audit history is kept by default.
+- `--include-raw` explicitly includes the raw audit log in reset.
+- JSON output can describe reset actions for scripts.
+
+Learning outcome:
+
+- Reset is more destructive than pruning, so it should be explicit and
+  reversible in spirit: preview first, require confirmation, and keep raw audit
+  history unless the user clearly asks to remove it.
+
+### Milestone 38: Ad-Hoc Eval Prompts
+
+Goal: make evals easy to run without writing JSON first.
+
+Built:
+
+- `python -m agent_zero eval --mode ask "..."` for direct prompt evals.
+- Ad-hoc eval names such as `ad-hoc-ask-explain-bedrock-gateway`.
+- `--context-budget` support for eval runs.
+- `--show-context` support for eval runs.
+- Existing JSON eval files still work.
+
+Learning outcome:
+
+- Evals are not normal user prompts; they are repeatable behavior records. Making
+  ad-hoc evals easy lets builders compare context selection, token usage, cost,
+  and model responses before and after agent changes.
+
+### Milestone 39: Deterministic Eval Scoring
+
+Goal: let evals judge simple response quality without another model call.
+
+Built:
+
+- `expected_terms` and `forbidden_terms` in eval JSON files.
+- Repeatable `--expect` and `--forbid` flags for ad-hoc evals.
+- Saved `score` objects with passed checks, missing expected terms, and present
+  forbidden terms.
+- Terminal score summary such as `Score: 2/3 (passed=False)`.
+
+Learning outcome:
+
+- Evaluation should start with deterministic checks. Before adding an LLM judge,
+  simple term-based scoring can catch missing core concepts and obvious
+  hallucination markers in a transparent way.
+
+### Milestone 40: User Feedback Memory
+
+Goal: let user feedback update curated memory.
+
+Built:
+
+- `python -m agent_zero memory --feedback worked`.
+- `python -m agent_zero memory --feedback failed`.
+- Optional `--status` filter to target candidate, confirmed, or rejected memory.
+- `worked` promotes the selected item to confirmed/high-confidence.
+- `failed` marks the selected item as rejected/low-confidence.
+- Feedback is stored as a memory event.
+
+Learning outcome:
+
+- Real learning should include user feedback. Validation tells the agent whether
+  tests passed, but users know whether the answer or fix actually helped.
+  Explicit feedback is the safe first step before inferring feedback from normal
+  conversation.
+
+### Milestone 41: Feedback Phrase Detection
+
+Goal: classify obvious feedback phrases safely before automatic memory updates.
+
+Built:
+
+- `python -m agent_zero memory --detect-feedback "it worked"`.
+- Conservative phrase detection for clear worked/failed feedback.
+- Dry-run behavior by default.
+- `--yes` required before detected feedback updates memory.
+- JSON output for detected feedback.
+
+Learning outcome:
+
+- Automatic feedback inference should start as an inspectable dry run. The agent
+  should show what it thinks the user meant before it starts changing memory
+  from normal conversation.
+
+### Milestone 42: Eval Report Command
+
+Goal: compare saved eval runs quickly.
+
+Built:
+
+- `python -m agent_zero eval-report`.
+- `--name` filtering for a specific eval family.
+- `--limit` to keep recent reports short.
+- `--json` output for scripts.
+- Aggregated token and cost totals across all model calls in a result.
+
+Learning outcome:
+
+- Evaluation improves the agent only when results are easy to inspect. A report
+  command turns timestamped JSON files into a quick view of score, cost, context
+  size, and changed-file behavior across runs.
 
 ## Design Principles
 

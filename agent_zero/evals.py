@@ -18,6 +18,8 @@ class EvalSpec:
     mode: EvalMode
     task: str
     validation_command: str | None = None
+    expected_terms: list[str] | None = None
+    forbidden_terms: list[str] | None = None
 
 
 def load_eval_spec(path: Path) -> EvalSpec:
@@ -35,6 +37,8 @@ def load_eval_spec(path: Path) -> EvalSpec:
     mode = data.get("mode")
     task = data.get("task")
     validation_command = data.get("validation_command")
+    expected_terms = data.get("expected_terms")
+    forbidden_terms = data.get("forbidden_terms")
 
     if not isinstance(name, str) or not name.strip():
         raise EvalSpecError("Eval spec requires a non-empty string field: name")
@@ -44,12 +48,18 @@ def load_eval_spec(path: Path) -> EvalSpec:
         raise EvalSpecError("Eval spec requires a non-empty string field: task")
     if validation_command is not None and not isinstance(validation_command, str):
         raise EvalSpecError("Eval spec validation_command must be a string.")
+    if expected_terms is not None and not _is_string_list(expected_terms):
+        raise EvalSpecError("Eval spec expected_terms must be a list of strings.")
+    if forbidden_terms is not None and not _is_string_list(forbidden_terms):
+        raise EvalSpecError("Eval spec forbidden_terms must be a list of strings.")
 
     return EvalSpec(
         name=name.strip(),
         mode=mode,
         task=task.strip(),
         validation_command=validation_command,
+        expected_terms=expected_terms,
+        forbidden_terms=forbidden_terms,
     )
 
 
@@ -69,3 +79,7 @@ def _safe_filename(value: str) -> str:
     safe = "".join(char.lower() if char.isalnum() else "-" for char in value)
     safe = "-".join(part for part in safe.split("-") if part)
     return safe or "eval"
+
+
+def _is_string_list(value: Any) -> bool:
+    return isinstance(value, list) and all(isinstance(item, str) for item in value)

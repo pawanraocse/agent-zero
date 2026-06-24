@@ -216,6 +216,164 @@ def load_memory_items(root: Path) -> list[dict[str, Any]]:
     return [_memory_item_from_row(row) for row in rows]
 
 
+def delete_memory_items(root: Path, statuses: set[str]) -> int:
+    path = root / MEMORY_DB_RELATIVE_PATH
+    if not path.exists():
+        return 0
+
+    items = [
+        item
+        for item in load_memory_items(root)
+        if item.get("status") in statuses and item.get("status") != "confirmed"
+    ]
+    if not items:
+        return 0
+
+    item_ids = [item["id"] for item in items]
+    placeholders = ", ".join("?" for _ in item_ids)
+    with sqlite3.connect(path) as connection:
+        _ensure_memory_schema(connection)
+        connection.execute(
+            f"delete from memory_events where memory_id in ({placeholders})",
+            item_ids,
+        )
+        connection.execute(
+            f"delete from memory_items where id in ({placeholders})",
+            item_ids,
+        )
+
+    return len(item_ids)
+
+
+def reset_memory(root: Path, include_raw: bool = False) -> dict[str, int]:
+    db_path = root / MEMORY_DB_RELATIVE_PATH
+    raw_path = root / MEMORY_RELATIVE_PATH
+    sqlite_items = len(load_memory_items(root))
+    raw_records = len(load_memory(root))
+
+    if db_path.exists():
+        db_path.unlink()
+    deleted_raw_records = 0
+    if include_raw and raw_path.exists():
+        raw_path.unlink()
+        deleted_raw_records = raw_records
+
+    return {
+        "sqlite_items": sqlite_items,
+        "raw_records": deleted_raw_records,
+    }
+
+
+def apply_memory_feedback(
+    root: Path,
+    feedback: str,
+    status: str | None = None,
+) -> dict[str, Any] | None:
+    path = root / MEMORY_DB_RELATIVE_PATH
+    if not path.exists():
+        return None
+
+    if feedback == "worked":
+        next_status = "confirmed"
+        next_confidence = "high"
+        event_type = "user_confirmed"
+    elif feedback == "failed":
+        next_status = "rejected"
+        next_confidence = "low"
+        event_type = "user_rejected"
+    else:
+        raise ValueError("feedback must be one of: worked, failed")
+
+    query = """
+        select id
+        from memory_items
+    """
+    params: list[str] = []
+    if status is not None:
+        query += " where status = ?"
+        params.append(status)
+    query += " order by updated_at desc, id desc limit 1"
+
+    now = datetime.now(UTC).isoformat()
+    with sqlite3.connect(path) as connection:
+        _ensure_memory_schema(connection)
+        row = connection.execute(query, params).fetchone()
+        if row is None:
+            return None
+
+        memory_id = row[0]
+        connection.execute(
+            """
+            update memory_items
+            set status = ?, confidence = ?, updated_at = ?, last_used_at = ?
+            where id = ?
+            """,
+            (next_status, next_confidence, now, now, memory_id),
+        )
+        connection.execute(
+            """
+            insert into memory_events (
+                memory_id, event_type, source, details_json, created_at
+            )
+            values (?, ?, ?, ?, ?)
+            """,
+            (
+                memory_id,
+                event_type,
+                "user",
+                json.dumps({"feedback": feedback}, sort_keys=True),
+                now,
+            ),
+        )
+
+    items = [item for item in load_memory_items(root) if item["id"] == memory_id]
+    return items[0] if items else None
+
+
+def detect_user_feedback(text: str) -> str | None:
+    normalized = " ".join(_normalize(text).split())
+    if not normalized:
+        return None
+
+    worked_phrases = {
+        "it worked",
+        "that worked",
+        "this worked",
+        "worked",
+        "it fixed",
+        "that fixed it",
+        "fixed it",
+        "looks good",
+        "that looks good",
+        "this looks good",
+        "it is working",
+        "its working",
+        "it works",
+    }
+    failed_phrases = {
+        "it failed",
+        "that failed",
+        "this failed",
+        "failed",
+        "did not work",
+        "does not work",
+        "didnt work",
+        "doesnt work",
+        "not working",
+        "issue still exists",
+        "still broken",
+        "wrong answer",
+        "this is wrong",
+        "that is wrong",
+    }
+
+    if normalized in worked_phrases:
+        return "worked"
+    if normalized in failed_phrases:
+        return "failed"
+    return None
+
+
 def memory_item_scores(
     items: list[dict[str, Any]],
     query_terms: list[str],

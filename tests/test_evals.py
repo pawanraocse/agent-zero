@@ -13,6 +13,8 @@ def test_load_eval_spec_from_json_file(tmp_path):
                 "name": "ask-project",
                 "mode": "ask",
                 "task": "What does this project do?",
+                "expected_terms": ["Agent Zero"],
+                "forbidden_terms": ["production assistant"],
             }
         ),
         encoding="utf-8",
@@ -24,6 +26,8 @@ def test_load_eval_spec_from_json_file(tmp_path):
     assert spec.mode == "ask"
     assert spec.task == "What does this project do?"
     assert spec.validation_command is None
+    assert spec.expected_terms == ["Agent Zero"]
+    assert spec.forbidden_terms == ["production assistant"]
 
 
 def test_load_eval_spec_rejects_invalid_mode(tmp_path):
@@ -40,6 +44,24 @@ def test_load_eval_spec_rejects_invalid_mode(tmp_path):
     )
 
     with pytest.raises(EvalSpecError, match="mode must be one of"):
+        load_eval_spec(spec_path)
+
+
+def test_load_eval_spec_rejects_invalid_expected_terms(tmp_path):
+    spec_path = tmp_path / "bad-terms.json"
+    spec_path.write_text(
+        json.dumps(
+            {
+                "name": "bad-terms",
+                "mode": "ask",
+                "task": "Explain Bedrock gateway",
+                "expected_terms": ["Bedrock", 42],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(EvalSpecError, match="expected_terms"):
         load_eval_spec(spec_path)
 
 

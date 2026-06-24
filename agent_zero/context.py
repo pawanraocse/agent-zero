@@ -28,7 +28,6 @@ OVERVIEW_PRIORS = {
 }
 
 DEFAULT_CONTEXT_BUDGET_TOKENS = 8_000
-DEFAULT_FILE_CONTEXT_CHARS = 6_000
 CHARS_PER_TOKEN_ESTIMATE = 4
 
 STOP_WORDS = {
@@ -185,7 +184,7 @@ def _read_budgeted_snippets(
             skipped_files.append(relative_path)
             continue
 
-        max_chars = min(DEFAULT_FILE_CONTEXT_CHARS, remaining_chars)
+        max_chars = remaining_chars
         try:
             snippet = read_focused_text_file(
                 root,

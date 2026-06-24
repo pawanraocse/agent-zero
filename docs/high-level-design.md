@@ -863,6 +863,178 @@ Learning outcome:
   explain what happened, candidate memory records what may be useful, and
   confirmed memory can safely influence future context selection.
 
+### Milestone 34: Memory Inspection Command
+
+Goal: expose local memory state from the CLI.
+
+Steps:
+
+1. Add a read-only `memory` command. Done.
+2. Show raw JSONL memory record counts. Done.
+3. Show SQLite memory item counts. Done.
+4. Group memory items by confirmed, candidate, and rejected status. Done.
+5. Support `--status` filtering. Done.
+6. Support `--json` output for scripts and debugging. Done.
+
+Learning outcome:
+
+- Understand that memory needs observability. A learning agent should make it
+  easy to inspect what it saw, what it learned, and what it deliberately refuses
+  to reuse.
+
+### Milestone 35: Code Context Budget
+
+Goal: make code-mode context size user-controllable.
+
+Steps:
+
+1. Add `--context-budget` to `code`. Done.
+2. Pass the requested budget into repository context building. Done.
+3. Show the chosen budget in trace output. Done.
+4. Cover code-mode budget behavior with a CLI test. Done.
+5. Let selected files use the remaining context budget instead of a small fixed
+   per-file cap. Done.
+
+Learning outcome:
+
+- Understand that patch generation has a context tradeoff. Smaller prompts
+  reduce cost, but larger files may need more exact context for patches to apply
+  cleanly.
+
+### Milestone 36: Memory Pruning
+
+Goal: safely remove low-value curated memory.
+
+Steps:
+
+1. Add dry-run pruning to the `memory` command. Done.
+2. Default pruning to rejected memory. Done.
+3. Require `--yes` before deletion. Done.
+4. Allow candidate pruning with `--status candidate --prune`. Done.
+5. Protect confirmed memory from pruning. Done.
+6. Delete matching SQLite memory events with their memory items. Done.
+
+Learning outcome:
+
+- Understand that memory cleanup is part of the agent lifecycle. Safe pruning
+  starts with explainable dry runs, protects trusted memory, and can later become
+  an automated policy.
+
+### Milestone 37: Memory Reset
+
+Goal: reset generated memory state safely.
+
+Steps:
+
+1. Add `--reset` to the `memory` command. Done.
+2. Make reset dry-run by default. Done.
+3. Require `--yes` before deleting memory. Done.
+4. Delete SQLite curated memory by default. Done.
+5. Keep raw JSONL audit history unless `--include-raw` is provided. Done.
+6. Support JSON reset output. Done.
+
+Learning outcome:
+
+- Understand that reset operations need stronger guardrails than pruning.
+  Curated learning state can be rebuilt, but audit history should remain unless
+  the user explicitly chooses to remove it.
+
+### Milestone 38: Ad-Hoc Eval Prompts
+
+Goal: run evals from direct prompts as well as JSON files.
+
+Steps:
+
+1. Add `--mode ask|plan|code` to the `eval` command. Done.
+2. Treat the positional argument as task text when `--mode` is present. Done.
+3. Keep JSON-file eval behavior when `--mode` is omitted. Done.
+4. Generate deterministic ad-hoc eval names from mode and task terms. Done.
+5. Support `--context-budget` for eval context experiments. Done.
+6. Support `--show-context` for eval retrieval debugging. Done.
+
+Learning outcome:
+
+- Understand that evals are measurement runs. They save structured evidence
+  about agent behavior so changes to prompts, retrieval, memory, and validation
+  can be compared over time.
+
+### Milestone 39: Deterministic Eval Scoring
+
+Goal: score simple eval expectations without a model judge.
+
+Steps:
+
+1. Add `expected_terms` to eval JSON specs. Done.
+2. Add `forbidden_terms` to eval JSON specs. Done.
+3. Add repeatable `--expect` flags for ad-hoc evals. Done.
+4. Add repeatable `--forbid` flags for ad-hoc evals. Done.
+5. Store a `score` object in eval result JSON. Done.
+6. Print a short score summary in the terminal. Done.
+
+Learning outcome:
+
+- Understand that eval scoring can start deterministically. Term checks are not
+  deep semantic evaluation, but they are transparent, cheap, and good for
+  catching missing concepts or obvious hallucination markers.
+
+### Milestone 40: User Feedback Memory
+
+Goal: let users explicitly correct memory.
+
+Steps:
+
+1. Add `--feedback worked` to the `memory` command. Done.
+2. Add `--feedback failed` to the `memory` command. Done.
+3. Allow `--status` to narrow which memory item receives feedback. Done.
+4. Promote worked feedback to confirmed/high-confidence. Done.
+5. Mark failed feedback as rejected/low-confidence. Done.
+6. Record feedback as a memory event. Done.
+
+Learning outcome:
+
+- Understand that self-learning agents need external feedback. System signals
+  such as validation are useful, but user confirmation or rejection is a
+  separate and valuable learning channel.
+
+### Milestone 41: Feedback Phrase Detection
+
+Goal: detect clear user feedback without silently mutating memory.
+
+Steps:
+
+1. Add deterministic feedback phrase detection. Done.
+2. Recognize clear positive phrases such as `it worked`. Done.
+3. Recognize clear negative phrases such as `did not work`. Done.
+4. Add `memory --detect-feedback "..."`. Done.
+5. Make detection dry-run by default. Done.
+6. Require `--yes` to apply detected feedback to memory. Done.
+
+Learning outcome:
+
+- Understand that automatic feedback inference needs guardrails. It should begin
+  as a visible classifier before being wired into normal agent prompts.
+
+### Milestone 42: Eval Report Command
+
+Goal: make saved eval results easy to compare.
+
+Steps:
+
+1. Add an `eval-report` command. Done.
+2. Read timestamped JSON files from `eval-results/`. Done.
+3. Summarize name, mode, status, success, score, token usage, cost, selected
+   file count, and changed file count. Done.
+4. Add `--name` filtering for a family of eval runs. Done.
+5. Add `--limit` for recent-result views. Done.
+6. Add `--json` for scripts and later dashboards. Done.
+
+Learning outcome:
+
+- Understand that evals create evidence, but reports make that evidence useful.
+  A small read-only report command lets builders compare whether context
+  changes improved quality, cost, or file selection without opening each JSON
+  result manually.
+
 ## Suggested Implementation Order
 
 Build in this order:
@@ -905,6 +1077,15 @@ Build in this order:
 36. Memory hygiene.
 37. Memory candidate classifier.
 38. Confirmed memory retrieval.
+39. Memory inspection command.
+40. Code context budget.
+41. Memory pruning.
+42. Memory reset.
+43. Ad-hoc eval prompts.
+44. Deterministic eval scoring.
+45. User feedback memory.
+46. Feedback phrase detection.
+47. Eval report command.
 
 Each step should leave the project runnable.
 
