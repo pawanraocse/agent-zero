@@ -1604,7 +1604,7 @@ def test_eval_command_runs_code_eval_and_writes_validation_result(
             {
                 "name": "change-text",
                 "mode": "code",
-                "task": "Change old to new",
+                "task": "Change hello.txt old to new",
                 "validation_command": "pytest",
             }
         ),
@@ -1705,7 +1705,7 @@ diff --git a/hello.txt b/hello.txt
     runner = CliRunner()
     result = runner.invoke(
         app,
-        ["code", "Change old to new", "--env-file", str(env_file)],
+        ["code", "Change hello.txt old to new", "--env-file", str(env_file)],
     )
 
     assert result.exit_code == 0
@@ -1718,7 +1718,7 @@ diff --git a/hello.txt b/hello.txt
     assert target.read_text(encoding="utf-8") == "new\n"
     system_prompt, user_prompt = fake_client.calls[0]
     assert system_prompt == cli.CODE_SYSTEM_PROMPT
-    assert "Change request:\nChange old to new" in user_prompt
+    assert "Change request:\nChange hello.txt old to new" in user_prompt
 
 
 def test_code_command_accepts_context_budget(tmp_path, monkeypatch):
@@ -1785,6 +1785,47 @@ def test_code_command_clarifies_vague_documentation_request_before_config(
     assert "AGENT_ZERO_API_KEY" not in result.output
 
 
+def test_code_command_clarifies_vague_generic_change_before_model(
+    tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+
+    result = runner.invoke(app, ["code", "Change old to new", "--trace-json"])
+
+    assert result.exit_code == 2
+    assert "Clarification needed:" in result.output
+    assert "- target file or component" in result.output
+    assert "No model call made." in result.output
+    trace = json.loads(result.output.split("Trace JSON:\n", maxsplit=1)[1])
+    assert trace["status"] == "clarification_needed"
+    assert trace["classification"]["missing_information"] == [
+        "target file or component"
+    ]
+    assert trace["model_calls"] == []
+
+
+def test_code_command_clarification_prints_trace_json(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        ["code", "Add a short README note", "--trace-json"],
+    )
+
+    assert result.exit_code == 2
+    trace = json.loads(result.output.split("Trace JSON:\n", maxsplit=1)[1])
+    assert trace["mode"] == "code"
+    assert trace["status"] == "clarification_needed"
+    assert trace["success"] is False
+    assert trace["provider"] is None
+    assert trace["context"] is None
+    assert trace["classification"]["subcategory"] == "documentation_edit"
+    assert trace["model_calls"] == []
+    assert trace["patch_summary"] == []
+
+
 def test_code_command_records_clarification_needed_as_rejected_memory(
     tmp_path, monkeypatch
 ):
@@ -1848,7 +1889,13 @@ def test_code_command_dry_run_prints_patch_without_changing_files(
     runner = CliRunner()
     result = runner.invoke(
         app,
-        ["code", "Change old to new", "--dry-run", "--env-file", str(env_file)],
+        [
+            "code",
+            "Change hello.txt old to new",
+            "--dry-run",
+            "--env-file",
+            str(env_file),
+        ],
     )
 
     assert result.exit_code == 0
@@ -1862,6 +1909,65 @@ def test_code_command_dry_run_prints_patch_without_changing_files(
     assert "Tokens: input=30, output=20, total=50" in result.output
     assert target.read_text(encoding="utf-8") == "old\n"
     assert validation_calls == []
+
+
+def test_code_command_dry_run_prints_trace_json(tmp_path, monkeypatch):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "AGENT_ZERO_BASE_URL=http://localhost:1234/v1",
+                "AGENT_ZERO_API_KEY=test-key",
+                "AGENT_ZERO_MODEL=test-model",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    target = tmp_path / "hello.txt"
+    target.write_text("old\n", encoding="utf-8")
+    fake_client = FakeModelClient(
+        ModelResponse(
+            content="""diff --git a/hello.txt b/hello.txt
+--- a/hello.txt
++++ b/hello.txt
+@@ -1 +1 @@
+-old
++new
+""",
+            input_tokens=30,
+            output_tokens=20,
+            total_tokens=50,
+        )
+    )
+    monkeypatch.setattr(cli, "create_model_client", lambda config: fake_client)
+    monkeypatch.chdir(tmp_path)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        [
+            "code",
+            "Change hello.txt old to new",
+            "--dry-run",
+            "--trace-json",
+            "--env-file",
+            str(env_file),
+        ],
+    )
+
+    assert result.exit_code == 0
+    trace = json.loads(result.output.split("Trace JSON:\n", maxsplit=1)[1])
+    assert trace["mode"] == "code"
+    assert trace["status"] == "dry_run"
+    assert trace["success"] is True
+    assert trace["dry_run"] is True
+    assert trace["changed_files"] == []
+    assert trace["patch_summary"] == [
+        {"path": "hello.txt", "additions": 1, "deletions": 1}
+    ]
+    assert trace["validation"] is None
+    assert trace["model_calls"][0]["usage"]["total_tokens"] == 50
+    assert target.read_text(encoding="utf-8") == "old\n"
 
 
 def test_code_command_dry_run_prints_changed_python_symbols(tmp_path, monkeypatch):
@@ -1904,7 +2010,13 @@ def test_code_command_dry_run_prints_changed_python_symbols(tmp_path, monkeypatc
     runner = CliRunner()
     result = runner.invoke(
         app,
-        ["code", "Change greeting", "--dry-run", "--env-file", str(env_file)],
+        [
+            "code",
+            "Change app.py greeting return old to new",
+            "--dry-run",
+            "--env-file",
+            str(env_file),
+        ],
     )
 
     assert result.exit_code == 0
@@ -1946,7 +2058,7 @@ def test_code_command_dry_run_trace_prints_code_steps(tmp_path, monkeypatch):
         app,
         [
             "code",
-            "Change old to new",
+            "Change hello.txt old to new",
             "--dry-run",
             "--trace",
             "--env-file",
@@ -2000,7 +2112,7 @@ def test_code_command_rejects_empty_patch_in_dry_run(tmp_path, monkeypatch):
         app,
         [
             "code",
-            "Add a note",
+            "Update hello.txt saying same",
             "--dry-run",
             "--trace",
             "--env-file",
@@ -2065,7 +2177,7 @@ def test_code_command_retries_empty_patch_in_dry_run(tmp_path, monkeypatch):
         app,
         [
             "code",
-            "Change old to new",
+            "Change hello.txt old to new",
             "--dry-run",
             "--trace",
             "--env-file",
@@ -2193,7 +2305,12 @@ def test_code_command_treats_no_change_response_as_success(tmp_path, monkeypatch
     runner = CliRunner()
     result = runner.invoke(
         app,
-        ["code", "Change something", "--env-file", str(env_file)],
+        [
+            "code",
+            "Change hello.txt something to another thing",
+            "--env-file",
+            str(env_file),
+        ],
     )
 
     assert result.exit_code == 0
@@ -2221,7 +2338,12 @@ def test_code_command_reports_missing_diff_when_not_noop(tmp_path, monkeypatch):
     runner = CliRunner()
     result = runner.invoke(
         app,
-        ["code", "Change something", "--env-file", str(env_file)],
+        [
+            "code",
+            "Change hello.txt something to another thing",
+            "--env-file",
+            str(env_file),
+        ],
     )
 
     assert result.exit_code == 1
@@ -2260,7 +2382,7 @@ def test_code_command_reports_patch_failure(tmp_path, monkeypatch):
     runner = CliRunner()
     result = runner.invoke(
         app,
-        ["code", "Change expected to new", "--env-file", str(env_file)],
+        ["code", "Change hello.txt expected to new", "--env-file", str(env_file)],
     )
 
     assert result.exit_code == 1
@@ -2311,12 +2433,83 @@ def test_code_command_runs_validation_success(tmp_path, monkeypatch):
     runner = CliRunner()
     result = runner.invoke(
         app,
-        ["code", "Change old to new", "--env-file", str(env_file)],
+        ["code", "Change hello.txt old to new", "--env-file", str(env_file)],
     )
 
     assert result.exit_code == 0
     assert "Validation command: pytest" in result.output
     assert "Validation passed." in result.output
+
+
+def test_code_command_validation_success_prints_trace_json(tmp_path, monkeypatch):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "AGENT_ZERO_BASE_URL=http://localhost:1234/v1",
+                "AGENT_ZERO_API_KEY=test-key",
+                "AGENT_ZERO_MODEL=test-model",
+                "AGENT_ZERO_VALIDATION_COMMAND=pytest",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    target = tmp_path / "hello.txt"
+    target.write_text("old\n", encoding="utf-8")
+    fake_client = FakeModelClient(
+        ModelResponse(
+            content="""diff --git a/hello.txt b/hello.txt
+--- a/hello.txt
++++ b/hello.txt
+@@ -1 +1 @@
+-old
++new
+""",
+            input_tokens=30,
+            output_tokens=20,
+            total_tokens=50,
+        )
+    )
+    monkeypatch.setattr(cli, "create_model_client", lambda config: fake_client)
+    monkeypatch.setattr(
+        cli,
+        "run_command",
+        lambda command, cwd, timeout_seconds: CommandResult(
+            command=["pytest"],
+            exit_code=0,
+            stdout="passed\n",
+            stderr="",
+        ),
+    )
+    monkeypatch.chdir(tmp_path)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        [
+            "code",
+            "Change hello.txt old to new",
+            "--trace-json",
+            "--env-file",
+            str(env_file),
+        ],
+    )
+
+    assert result.exit_code == 0
+    trace = json.loads(result.output.split("Trace JSON:\n", maxsplit=1)[1])
+    assert trace["mode"] == "code"
+    assert trace["status"] == "validation_passed"
+    assert trace["success"] is True
+    assert trace["dry_run"] is False
+    assert trace["changed_files"] == ["hello.txt"]
+    assert trace["patch_summary"] == [
+        {"path": "hello.txt", "additions": 1, "deletions": 1}
+    ]
+    assert trace["validation"]["passed"] is True
+    assert trace["validation"]["command"] == ["pytest"]
+    assert trace["model_calls"][0]["purpose"] == "initial"
+    assert trace["model_calls"][0]["usage"]["total_tokens"] == 50
+    assert target.read_text(encoding="utf-8") == "new\n"
 
 
 def test_code_command_runs_layered_validation_commands(tmp_path, monkeypatch):
@@ -2364,7 +2557,7 @@ def test_code_command_runs_layered_validation_commands(tmp_path, monkeypatch):
     runner = CliRunner()
     result = runner.invoke(
         app,
-        ["code", "Change old to new", "--env-file", str(env_file)],
+        ["code", "Change hello.txt old to new", "--env-file", str(env_file)],
     )
 
     assert result.exit_code == 0
@@ -2419,7 +2612,7 @@ def test_code_command_trace_prints_patch_and_validation_steps(tmp_path, monkeypa
     runner = CliRunner()
     result = runner.invoke(
         app,
-        ["code", "Change old to new", "--trace", "--env-file", str(env_file)],
+        ["code", "Change hello.txt old to new", "--trace", "--env-file", str(env_file)],
     )
 
     assert result.exit_code == 0
@@ -2474,7 +2667,7 @@ def test_code_command_reports_validation_failure(tmp_path, monkeypatch):
     runner = CliRunner()
     result = runner.invoke(
         app,
-        ["code", "Change old to new", "--env-file", str(env_file)],
+        ["code", "Change hello.txt old to new", "--env-file", str(env_file)],
     )
 
     assert result.exit_code == 1

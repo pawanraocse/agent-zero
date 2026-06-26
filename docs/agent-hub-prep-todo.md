@@ -125,17 +125,18 @@ Goal: make agent execution inspectable by other software.
 
 Build:
 
-- [x] Add `--trace-json` to `ask` and `plan`.
-- [ ] Add `--trace-json` to `code` and `eval`.
+- [x] Add `--trace-json` to `ask`, `plan`, and `code`.
+- [ ] Add `--trace-json` to `eval`.
 - [x] Include mode, task, provider, model, selected files, skipped files,
       context budget, model calls, usage, cost, validation, memory status, and
-      final status for read-only modes.
+      final status for ask, plan, and code.
 - [ ] Save optional trace files under `.agent-zero/traces/`.
 
 Example:
 
 ```bash
 python -m agent_zero ask "Explain Bedrock gateway" --trace-json
+python -m agent_zero code "Add one sentence to README.md saying Agent Zero exposes code trace JSON" --dry-run --trace-json
 ```
 
 Why Agent Hub needs it:
@@ -149,7 +150,7 @@ Tests:
 - [x] JSON trace is valid JSON.
 - [x] Ask trace includes selected files and usage.
 - [x] Plan trace includes selected files and usage.
-- [ ] Code trace includes patch/validation status.
+- [x] Code trace includes patch/validation status.
 - [ ] Failed runs include error status.
 
 ## Priority 4: Tool Call Records

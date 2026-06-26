@@ -111,7 +111,7 @@ Completed:
 - Validation: single validation command or layered test, lint, and format
   commands.
 - Observability: `--show-context`, `--trace`, `--trace-level`, patch summaries,
-  read-only `--trace-json`, patch summaries, changed Python symbols, token
+  `--trace-json` for ask, plan, and code, patch summaries, changed Python symbols, token
   usage, cost output, eval reports, and memory inspection.
 - Local learning: `.agent-zero/memory.jsonl`, reflection records, confidence
   labels, duplicate compaction, memory hygiene, SQLite memory candidates, and
@@ -124,7 +124,7 @@ Completed:
 
 Pending:
 
-- `--trace-json` for `code` and `eval`, including patch and validation details.
+- `--trace-json` for `eval`.
 - Optional saved trace files under `.agent-zero/traces/`.
 - Semantic memory retrieval using embeddings or a graph index.
 - Stronger eval suites that repeatedly test ask, plan, code, retries, Bedrock,
@@ -135,11 +135,13 @@ Pending:
 
 Recommended next milestone:
 
-> Extend `--trace-json` to `code` mode so patch application, retries,
-> validation, and changed files become machine-readable.
+> Add structured tool call records so retrieval, model calls, patching, and
+> validation become an auditable sequence.
 
 Detailed roadmap:
 
+- See `docs/agent-zero-finish-line.md` for the focused list of what to finish
+  before starting Agent Hub.
 - See `docs/project-todo.md` for the full implementation and testing TODO.
 - See `docs/agent-hub-prep-todo.md` for improvements to try before building
   Agent Hub.
@@ -659,16 +661,17 @@ Agent trace:
 `--show-context` explains why files were selected. `--trace` explains what the
 agent did in order.
 
-For machine-readable traces in read-only modes, use `--trace-json`:
+For machine-readable traces, use `--trace-json`:
 
 ```bash
 python -m agent_zero ask "Explain Bedrock gateway" --trace-json
 python -m agent_zero plan "Add a new provider" --trace-json
+python -m agent_zero code "Add one sentence to README.md saying Agent Zero exposes code trace JSON" --dry-run --trace-json
 ```
 
 This prints a JSON trace with mode, task, provider, model, selected files,
 included/skipped/truncated files, context budget, retrieval reasons, model call
-usage, status, and success.
+usage, patch summary, changed files, validation, status, and success.
 
 For deeper debugging, use `--trace-level debug`:
 
@@ -1856,24 +1859,26 @@ Learning outcome:
   harness can tolerate stale hunk headers without becoming unsafe, as long as it
   still requires exact context.
 
-### Milestone 46: Read-Only Trace JSON
+### Milestone 46: Run Trace JSON
 
-Goal: make read-only agent runs inspectable by software, not only by humans
-reading terminal text.
+Goal: make agent runs inspectable by software, not only by humans reading
+terminal text.
 
 Built:
 
 - `--trace-json` for `ask`.
 - `--trace-json` for `plan`.
+- `--trace-json` for `code`.
 - JSON trace fields for mode, task, provider, model, status, success, context
-  selection, retrieval reasons, model calls, usage, changed files, and
-  validation.
+  selection, retrieval reasons, model calls, usage, patch summary, changed
+  files, retries, and validation.
 - Human output remains unchanged; the trace JSON is printed at the end.
 
 Example:
 
 ```bash
 python -m agent_zero ask "Explain Bedrock gateway" --trace-json
+python -m agent_zero code "Add one sentence to README.md saying Agent Zero exposes code trace JSON" --dry-run --trace-json
 ```
 
 Learning outcome:

@@ -1095,20 +1095,23 @@ Learning outcome:
 - Patch reliability does not have to mean trusting vague edits. The harness can
   be tolerant of stale line anchors while still requiring exact file context.
 
-### Milestone 46: Read-Only Trace JSON
+### Milestone 46: Run Trace JSON
 
-Goal: make read-only agent runs inspectable by software, not only by humans
-reading terminal text.
+Goal: make agent runs inspectable by software, not only by humans reading
+terminal text.
 
 Steps:
 
 1. Add `--trace-json` to `ask`. Done.
 2. Add `--trace-json` to `plan`. Done.
-3. Include mode, task, provider, model, status, success, context selection,
+3. Add `--trace-json` to `code`. Done.
+4. Include mode, task, provider, model, status, success, context selection,
    retrieval reasons, model calls, usage, changed files, and validation fields.
    Done.
-4. Keep human output unchanged and print the JSON trace at the end. Done.
-5. Extend the same shape to `code`, `eval`, and saved trace files later.
+5. Include code-specific patch summary, dry-run, retry, and validation details.
+   Done.
+6. Keep human output unchanged and print the JSON trace at the end. Done.
+7. Extend the same shape to `eval` and saved trace files later.
 
 Learning outcome:
 

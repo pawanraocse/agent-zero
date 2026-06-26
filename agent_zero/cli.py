@@ -298,7 +298,11 @@ def _run_trace_json(
     success: bool,
     model_calls: list[dict] | None = None,
     changed_files: list[str] | None = None,
+    patch_summary: list[dict] | None = None,
     validation: ValidationResult | None = None,
+    classification: dict | None = None,
+    dry_run: bool = False,
+    retries: list[dict] | None = None,
     error: str | None = None,
 ) -> dict:
     decision = repository_context.decision
@@ -326,11 +330,38 @@ def _run_trace_json(
         },
         "model_calls": model_calls or [],
         "changed_files": changed_files or [],
+        "patch_summary": patch_summary or [],
         "validation": _validation_summary(validation),
+        "classification": classification,
+        "dry_run": dry_run,
+        "retries": retries or [],
     }
     if error is not None:
         trace["error"] = error
     return trace
+
+
+def _code_clarification_trace_json(
+    task: str,
+    classification,
+    dry_run: bool,
+) -> dict:
+    return {
+        "mode": "code",
+        "task": task,
+        "provider": None,
+        "model": None,
+        "status": "clarification_needed",
+        "success": False,
+        "classification": classification.to_dict(),
+        "context": None,
+        "model_calls": [],
+        "changed_files": [],
+        "patch_summary": [],
+        "validation": None,
+        "dry_run": dry_run,
+        "retries": [],
+    }
 
 
 def _print_code_trace(message: str, trace_level: TraceLevel) -> None:
@@ -482,11 +513,7 @@ def classify_command(
 def _code_request_needs_clarification(classification) -> bool:
     if classification.recommended_mode != "code":
         return False
-    if not classification.requires_clarification:
-        return False
-    return classification.subcategory == "possible_write" or (
-        "exact documentation text or topic" in classification.missing_information
-    )
+    return classification.requires_clarification
 
 
 def _print_clarification_needed(classification) -> None:
@@ -1076,6 +1103,11 @@ def code(
         "--trace-level",
         help="Trace verbosity: none, basic, or debug.",
     ),
+    trace_json: bool = typer.Option(
+        False,
+        "--trace-json",
+        help="Print a machine-readable run trace after code execution.",
+    ),
 ) -> None:
     """Apply a focused code change and validate it."""
     resolved_trace_level = _resolve_trace_level(trace, trace_level)
@@ -1092,6 +1124,14 @@ def code(
             status="clarification_needed",
             success=False,
         )
+        if trace_json:
+            _print_trace_json(
+                _code_clarification_trace_json(
+                    task=task,
+                    classification=classification,
+                    dry_run=dry_run,
+                )
+            )
         raise typer.Exit(code=2)
 
     config = _load_config_or_exit(env_file)
@@ -1106,7 +1146,17 @@ def code(
     active_user_prompt = user_prompt
     response = _complete_with_config(active_system_prompt, active_user_prompt, config)
     _print_code_trace("Model response received.", resolved_trace_level)
-    usage = _usage_summary(response, config, active_system_prompt, active_user_prompt)
+    model_calls = [
+        _model_call_summary(
+            purpose="initial",
+            response=response,
+            config=config,
+            system_prompt=active_system_prompt,
+            user_prompt=active_user_prompt,
+        )
+    ]
+    retries = []
+    usage = model_calls[0]["usage"]
 
     try:
         diff_text = extract_unified_diff(response.content)
@@ -1124,6 +1174,20 @@ def code(
                 success=True,
                 usage=usage,
             )
+            if trace_json:
+                _print_trace_json(
+                    _run_trace_json(
+                        mode="code",
+                        task=task,
+                        config=config,
+                        repository_context=repository_context,
+                        status="no_changes",
+                        success=True,
+                        model_calls=model_calls,
+                        classification=classification.to_dict(),
+                        dry_run=dry_run,
+                    )
+                )
             return
         _print_code_trace("Diff extraction failed.", resolved_trace_level)
         typer.secho(f"Could not find a patch: {exc}", fg=typer.colors.RED, err=True)
@@ -1136,6 +1200,21 @@ def code(
             success=False,
             usage=usage,
         )
+        if trace_json:
+            _print_trace_json(
+                _run_trace_json(
+                    mode="code",
+                    task=task,
+                    config=config,
+                    repository_context=repository_context,
+                    status="diff_not_found",
+                    success=False,
+                    model_calls=model_calls,
+                    classification=classification.to_dict(),
+                    dry_run=dry_run,
+                    error=str(exc),
+                )
+            )
         raise typer.Exit(code=1) from exc
 
     _print_code_trace("Extracted unified diff.", resolved_trace_level)
@@ -1164,6 +1243,16 @@ def code(
         usage = _usage_summary(
             response, config, active_system_prompt, active_user_prompt
         )
+        model_calls.append(
+            _model_call_summary(
+                purpose="empty_patch_retry",
+                response=response,
+                config=config,
+                system_prompt=active_system_prompt,
+                user_prompt=active_user_prompt,
+            )
+        )
+        retries.append({"type": "empty_patch", "status": "recovered"})
         patch_summary = diff_summary_to_dicts(diff_summary)
     _print_code_trace(
         f"Patch summary prepared for {len(patch_summary)} file(s).",
@@ -1189,6 +1278,22 @@ def code(
             usage=usage,
             patch_summary=patch_summary,
         )
+        if trace_json:
+            _print_trace_json(
+                _run_trace_json(
+                    mode="code",
+                    task=task,
+                    config=config,
+                    repository_context=repository_context,
+                    status="dry_run",
+                    success=True,
+                    model_calls=model_calls,
+                    patch_summary=patch_summary,
+                    classification=classification.to_dict(),
+                    dry_run=True,
+                    retries=retries,
+                )
+            )
         return
 
     try:
@@ -1221,6 +1326,16 @@ def code(
         usage = _usage_summary(
             response, config, active_system_prompt, active_user_prompt
         )
+        model_calls.append(
+            _model_call_summary(
+                purpose="patch_application_retry",
+                response=response,
+                config=config,
+                system_prompt=active_system_prompt,
+                user_prompt=active_user_prompt,
+            )
+        )
+        retries.append({"type": "patch_application", "status": "recovered"})
         patch_summary = diff_summary_to_dicts(diff_summary)
 
     _print_code_trace(
@@ -1262,6 +1377,28 @@ def code(
         patch_summary=patch_summary,
         validation_passed=validation_result.passed if validation_result else None,
     )
+    if trace_json:
+        _print_trace_json(
+            _run_trace_json(
+                mode="code",
+                task=task,
+                config=config,
+                repository_context=repository_context,
+                status=(
+                    "validation_passed"
+                    if validation_result is not None and validation_result.passed
+                    else "completed"
+                ),
+                success=True,
+                model_calls=model_calls,
+                changed_files=patch_result.changed_files,
+                patch_summary=patch_summary,
+                validation=validation_result,
+                classification=classification.to_dict(),
+                dry_run=False,
+                retries=retries,
+            )
+        )
 
 
 @app.command("eval")

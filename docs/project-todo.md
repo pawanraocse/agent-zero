@@ -34,6 +34,9 @@ python -m agent_zero memory
 
 For a command-by-command manual test sequence, see `docs/testing-plan.md`.
 
+For the short finish line before Agent Hub, see
+`docs/agent-zero-finish-line.md`.
+
 For the focused set of Agent Zero improvements to try before building Agent
 Hub, see `docs/agent-hub-prep-todo.md`.
 
