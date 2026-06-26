@@ -22,6 +22,12 @@ class EvalSpec:
     forbidden_terms: list[str] | None = None
 
 
+@dataclass(frozen=True)
+class EvalSuite:
+    name: str
+    evals: list[EvalSpec]
+
+
 def load_eval_spec(path: Path) -> EvalSpec:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -30,8 +36,12 @@ def load_eval_spec(path: Path) -> EvalSpec:
     except json.JSONDecodeError as exc:
         raise EvalSpecError(f"Eval spec is not valid JSON: {path}") from exc
 
+    return eval_spec_from_dict(data, source=str(path))
+
+
+def eval_spec_from_dict(data: Any, source: str = "eval spec") -> EvalSpec:
     if not isinstance(data, dict):
-        raise EvalSpecError("Eval spec must be a JSON object.")
+        raise EvalSpecError(f"{source} must be a JSON object.")
 
     name = data.get("name")
     mode = data.get("mode")
@@ -41,17 +51,17 @@ def load_eval_spec(path: Path) -> EvalSpec:
     forbidden_terms = data.get("forbidden_terms")
 
     if not isinstance(name, str) or not name.strip():
-        raise EvalSpecError("Eval spec requires a non-empty string field: name")
+        raise EvalSpecError(f"{source} requires a non-empty string field: name")
     if mode not in {"ask", "plan", "code"}:
-        raise EvalSpecError("Eval spec mode must be one of: ask, plan, code")
+        raise EvalSpecError(f"{source} mode must be one of: ask, plan, code")
     if not isinstance(task, str) or not task.strip():
-        raise EvalSpecError("Eval spec requires a non-empty string field: task")
+        raise EvalSpecError(f"{source} requires a non-empty string field: task")
     if validation_command is not None and not isinstance(validation_command, str):
-        raise EvalSpecError("Eval spec validation_command must be a string.")
+        raise EvalSpecError(f"{source} validation_command must be a string.")
     if expected_terms is not None and not _is_string_list(expected_terms):
-        raise EvalSpecError("Eval spec expected_terms must be a list of strings.")
+        raise EvalSpecError(f"{source} expected_terms must be a list of strings.")
     if forbidden_terms is not None and not _is_string_list(forbidden_terms):
-        raise EvalSpecError("Eval spec forbidden_terms must be a list of strings.")
+        raise EvalSpecError(f"{source} forbidden_terms must be a list of strings.")
 
     return EvalSpec(
         name=name.strip(),
@@ -61,6 +71,39 @@ def load_eval_spec(path: Path) -> EvalSpec:
         expected_terms=expected_terms,
         forbidden_terms=forbidden_terms,
     )
+
+
+def load_eval_suite(path: Path) -> EvalSuite:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise EvalSpecError(f"Could not read eval suite: {path}") from exc
+    except json.JSONDecodeError as exc:
+        raise EvalSpecError(f"Eval suite is not valid JSON: {path}") from exc
+
+    if not isinstance(data, dict):
+        raise EvalSpecError("Eval suite must be a JSON object.")
+
+    name = data.get("name")
+    eval_items = data.get("evals")
+    if not isinstance(name, str) or not name.strip():
+        raise EvalSpecError("Eval suite requires a non-empty string field: name")
+    if not isinstance(eval_items, list) or not eval_items:
+        raise EvalSpecError("Eval suite requires a non-empty list field: evals")
+
+    specs = []
+    for index, item in enumerate(eval_items, start=1):
+        if isinstance(item, str):
+            spec_path = (path.parent / item).resolve()
+            specs.append(load_eval_spec(spec_path))
+        elif isinstance(item, dict):
+            specs.append(eval_spec_from_dict(item, source=f"eval suite item {index}"))
+        else:
+            raise EvalSpecError(
+                "Eval suite evals must contain file paths or eval objects."
+            )
+
+    return EvalSuite(name=name.strip(), evals=specs)
 
 
 def write_eval_result(result: dict[str, Any], output_dir: Path) -> Path:
@@ -73,6 +116,10 @@ def write_eval_result(result: dict[str, Any], output_dir: Path) -> Path:
         encoding="utf-8",
     )
     return path
+
+
+def write_eval_suite_result(result: dict[str, Any], output_dir: Path) -> Path:
+    return write_eval_result(result, output_dir)
 
 
 def _safe_filename(value: str) -> str:

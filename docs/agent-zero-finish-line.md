@@ -24,8 +24,8 @@ If a feature does not help answer that, leave it for Agent Hub.
 | 3 | Patch reliability guardrails, including stale hunk relocation | Done | Makes local patching safer and less brittle. |
 | 4 | `--trace-json` for `ask` and `plan` | Done | Proves run traces can be machine-readable. |
 | 5 | `--trace-json` for `code` | Done | Exposes patch, retry, validation, changed files, and main failure state. |
-| 6 | Structured tool call records | Pending | Needed for audit trails and future multi-agent debugging. |
-| 7 | Eval suite command | Pending | Lets us run regression checks before changing retrieval, memory, or prompts. |
+| 6 | Structured tool call records | Partial | Ask, plan, and code traces include major timed tool calls; deeper retrieval substeps are pending. |
+| 7 | Eval suite command | Done | Lets us run regression checks before changing retrieval, memory, or prompts. |
 | 8 | Cost budget guardrail | Pending | Prevents runaway token usage in larger workflows. |
 | 9 | Better relevance filtering | Pending | Reduces hallucination and context waste. |
 | 10 | Memory approval polish | Pending | Keeps self-learning explicit and reversible. |
@@ -58,12 +58,10 @@ These belong in Agent Hub.
 
 ## Recommended Order
 
-1. Add structured tool call records.
-2. Add `eval-suite`.
-3. Add cost budget guardrail.
-4. Improve relevance filtering.
-5. Polish memory approval and review.
-6. Stop Agent Zero and start Agent Hub.
+1. Add cost budget guardrail.
+2. Improve relevance filtering.
+3. Polish memory approval and review.
+4. Stop Agent Zero and start Agent Hub.
 
 ## Exit Criteria
 

@@ -159,12 +159,18 @@ Goal: record each internal action as a tool call.
 
 Build:
 
-- [ ] Define a `ToolCallRecord`.
-- [ ] Record file listing, text search, index load, memory load, context build,
-      model call, patch apply, and validation command.
-- [ ] Include status, duration, short input summary, short output summary, and
-      error message when present.
-- [ ] Add tool call records to trace JSON.
+- [x] Add initial structured tool call records to `ask`, `plan`, and
+      `code --trace-json`.
+- [x] Record classification, config loading, context building, model call, diff
+      extraction, patch apply, validation, and memory recording in code traces.
+- [x] Record config loading, context building, model call, and memory recording
+      in ask and plan traces.
+- [x] Include status, short input summary, short output summary, and error
+      message when present.
+- [x] Add `duration_ms` to tool call records.
+- [ ] Add deeper retrieval substeps: file listing, text search, index load, and
+      memory load.
+- [ ] Add tool call records to eval traces.
 
 Why Agent Hub needs it:
 
@@ -174,9 +180,11 @@ Why Agent Hub needs it:
 
 Tests:
 
-- [ ] Ask run records retrieval and model tools.
-- [ ] Code dry-run records retrieval and model tools but not patch apply.
-- [ ] Code apply records patch and validation tools.
+- [x] Ask run records context and model tools.
+- [x] Plan run records context and model tools.
+- [x] Code dry-run records retrieval and model tools but skips patch apply.
+- [x] Code apply records patch and validation tools.
+- [x] Tool call records include `duration_ms`.
 - [ ] Tool output summaries are bounded.
 
 ## Priority 5: Eval Suite Command
@@ -185,11 +193,13 @@ Goal: run a group of evals as a regression suite.
 
 Build:
 
-- [ ] Add `python -m agent_zero eval-suite evals/suites/core.json`.
-- [ ] Define suite JSON format.
-- [ ] Run each eval and collect result paths.
-- [ ] Print pass rate, failed eval names, total tokens, and total cost.
-- [ ] Save suite result JSON.
+- [x] Add `python -m agent_zero eval-suite evals/suites/core.json`.
+- [x] Define suite JSON format.
+- [x] Run each eval and collect result paths.
+- [x] Print pass rate, failed eval names, total tokens, and total cost.
+- [x] Save suite result JSON.
+- [x] Treat deterministic score failures as failed suite items, even when the
+      model call completed.
 
 Example suite:
 
@@ -215,10 +225,12 @@ Why Agent Hub needs it:
 
 Tests:
 
-- [ ] Suite parser accepts file evals and inline evals.
-- [ ] Suite result aggregates scores.
-- [ ] Failed eval exits non-zero unless `--allow-failures` is set.
-- [ ] Report includes total cost.
+- [x] Suite parser accepts file evals and inline evals.
+- [x] Suite result aggregates scores.
+- [x] Suite fails when a completed eval response misses expected terms or
+      includes forbidden terms.
+- [x] Failed eval exits non-zero unless `--allow-failures` is set.
+- [x] Report includes total cost.
 
 ## Priority 6: Cost Budget Guardrail
 

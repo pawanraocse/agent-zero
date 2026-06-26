@@ -65,10 +65,12 @@ Tasks:
   - Patch context mismatch.
   - Validation failure followed by retry.
   - README/documentation target narrowing.
-- [ ] Add an eval-suite command.
+- [x] Add an eval-suite command.
   - Proposed command: `python -m agent_zero eval-suite evals/suites/core.json`.
   - Suite file should list multiple eval specs.
   - Result should include pass rate, total tokens, total cost, and failed tasks.
+  - Suite pass/fail should include deterministic score checks, not just command
+    completion.
 - [ ] Add eval report comparison.
   - Proposed command: `python -m agent_zero eval-report --compare latest previous`.
   - Compare score, cost, selected file count, and changed files.

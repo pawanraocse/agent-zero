@@ -424,7 +424,33 @@ Expected learning:
 - Eval JSON files are raw evidence.
 - Eval report turns raw evidence into a comparison view.
 
-## Test 16: Failure Case - Empty Patch
+## Test 16: Eval Suite
+
+Run:
+
+```bash
+python -m agent_zero eval-suite evals/suites/core.json
+```
+
+Observe:
+
+- Total eval count.
+- Passed and failed counts.
+- Total tokens.
+- Estimated cost.
+- Individual eval result files.
+- Aggregate suite result under `eval-results/suites/`.
+- Score failures count as failed evals, even when the model call itself
+  completed successfully.
+
+Expected learning:
+
+- A suite turns scattered evals into a regression check.
+- Pass/fail should mean the behavior passed checks, not just that the command
+  finished.
+- This is the first step toward testing Agent Hub changes before trusting them.
+
+## Test 17: Failure Case - Empty Patch
 
 Run a request that may already be satisfied:
 
@@ -443,7 +469,7 @@ Expected learning:
 - Coding agents need guardrails for no-op or low-quality patches.
 - Empty patches should not be treated as successful code changes.
 
-## Test 17: Failure Case - Patch Context Mismatch
+## Test 18: Failure Case - Patch Context Mismatch
 
 Run a README edit with a small context budget:
 
@@ -469,7 +495,7 @@ Expected learning:
 - Too little context can produce weak patch anchors.
 - Increasing context can improve patch reliability, at higher cost.
 
-## Test 18: Validation Commands
+## Test 19: Validation Commands
 
 Check `.env` validation settings:
 
@@ -489,7 +515,7 @@ Expected learning:
 - Dry run skips patch application and validation.
 - Real code mode runs validation after applying the patch.
 
-## Test 19: Full Local Regression
+## Test 20: Full Local Regression
 
 Run:
 
@@ -505,7 +531,7 @@ Expected learning:
 - Ruff format protects style consistency.
 - Ruff check catches lint issues.
 
-## Test 20: Read Result JSON
+## Test 21: Read Result JSON
 
 After an eval, inspect the latest result:
 
@@ -534,7 +560,7 @@ Expected learning:
 - Eval results are the best way to debug what changed between runs.
 - They are also the foundation for future dashboards and eval suites.
 
-## Test 21: End-To-End Learning Loop
+## Test 22: End-To-End Learning Loop
 
 Run this sequence:
 

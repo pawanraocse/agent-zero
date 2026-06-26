@@ -2,7 +2,12 @@ import json
 
 import pytest
 
-from agent_zero.evals import EvalSpecError, load_eval_spec, write_eval_result
+from agent_zero.evals import (
+    EvalSpecError,
+    load_eval_spec,
+    load_eval_suite,
+    write_eval_result,
+)
 
 
 def test_load_eval_spec_from_json_file(tmp_path):
@@ -77,3 +82,52 @@ def test_write_eval_result_creates_timestamped_json_file(tmp_path):
     assert path.parent == tmp_path
     assert path.name.endswith("-readme-note.json")
     assert json.loads(path.read_text(encoding="utf-8")) == result
+
+
+def test_load_eval_suite_accepts_file_and_inline_specs(tmp_path):
+    spec_path = tmp_path / "ask-project.json"
+    spec_path.write_text(
+        json.dumps(
+            {
+                "name": "ask-project",
+                "mode": "ask",
+                "task": "What does this project do?",
+            }
+        ),
+        encoding="utf-8",
+    )
+    suite_path = tmp_path / "core.json"
+    suite_path.write_text(
+        json.dumps(
+            {
+                "name": "core",
+                "evals": [
+                    "ask-project.json",
+                    {
+                        "name": "bedrock",
+                        "mode": "ask",
+                        "task": "Explain Bedrock gateway",
+                        "expected_terms": ["BedrockGatewayClient"],
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    suite = load_eval_suite(suite_path)
+
+    assert suite.name == "core"
+    assert [spec.name for spec in suite.evals] == ["ask-project", "bedrock"]
+    assert suite.evals[1].expected_terms == ["BedrockGatewayClient"]
+
+
+def test_load_eval_suite_rejects_empty_evals(tmp_path):
+    suite_path = tmp_path / "bad-suite.json"
+    suite_path.write_text(
+        json.dumps({"name": "bad", "evals": []}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(EvalSpecError, match="non-empty list field: evals"):
+        load_eval_suite(suite_path)

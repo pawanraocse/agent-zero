@@ -673,6 +673,11 @@ This prints a JSON trace with mode, task, provider, model, selected files,
 included/skipped/truncated files, context budget, retrieval reasons, model call
 usage, patch summary, changed files, validation, status, and success.
 
+The trace also includes a `tool_calls` array. For ask and plan, it records
+config loading, context building, model completion, and memory recording. For
+code, it also records classification, diff extraction, patch application, and
+validation. Each tool call includes `duration_ms`.
+
 For deeper debugging, use `--trace-level debug`:
 
 ```bash
@@ -868,6 +873,35 @@ You can still run file-based evals for repeatable benchmark tasks:
 ```bash
 python -m agent_zero eval evals/ask-project.json
 ```
+
+Run multiple evals as a suite:
+
+```bash
+python -m agent_zero eval-suite evals/suites/core.json
+```
+
+An eval suite can reference eval files or include inline eval objects:
+
+```json
+{
+  "name": "core",
+  "evals": [
+    "../ask-project.json",
+    {
+      "name": "bedrock-gateway",
+      "mode": "ask",
+      "task": "Explain Bedrock gateway",
+      "expected_terms": ["BedrockGatewayClient", "polling"],
+      "forbidden_terms": ["AWS SDK"]
+    }
+  ]
+}
+```
+
+The suite command writes individual eval results plus an aggregate suite result
+under `eval-results/suites/`. A suite item passes only when the agent run
+succeeds and its deterministic score passes. For example, a completed answer
+that mentions a forbidden term is reported as `score_failed`, not as a pass.
 
 An eval file is small JSON:
 
@@ -1872,6 +1906,8 @@ Built:
 - JSON trace fields for mode, task, provider, model, status, success, context
   selection, retrieval reasons, model calls, usage, patch summary, changed
   files, retries, and validation.
+- Ask, plan, and code traces include an initial `tool_calls` audit sequence for
+  the major harness steps.
 - Human output remains unchanged; the trace JSON is printed at the end.
 
 Example:

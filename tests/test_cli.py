@@ -220,6 +220,14 @@ def test_ask_command_prints_trace_json(tmp_path, monkeypatch):
     assert trace["model_calls"][0]["usage"]["estimated_cost"] == "$0.000020"
     assert trace["changed_files"] == []
     assert trace["validation"] is None
+    assert [call["name"] for call in trace["tool_calls"]] == [
+        "load_config",
+        "build_repository_context",
+        "model.complete",
+        "record_memory",
+    ]
+    assert trace["tool_calls"][2]["status"] == "success"
+    assert all(isinstance(call["duration_ms"], float) for call in trace["tool_calls"])
 
 
 def test_ask_command_accepts_context_budget(tmp_path, monkeypatch):
@@ -677,6 +685,13 @@ def test_plan_command_prints_trace_json(tmp_path, monkeypatch):
     assert trace["success"] is True
     assert trace["context"]["selected_files"] == ["README.md"]
     assert trace["model_calls"][0]["purpose"] == "initial"
+    assert [call["name"] for call in trace["tool_calls"]] == [
+        "load_config",
+        "build_repository_context",
+        "model.complete",
+        "record_memory",
+    ]
+    assert all(isinstance(call["duration_ms"], float) for call in trace["tool_calls"])
 
 
 def test_plan_command_trace_prints_agent_timeline(tmp_path, monkeypatch):
@@ -1439,6 +1454,261 @@ def test_eval_command_rejects_invalid_ad_hoc_mode(tmp_path, monkeypatch):
     assert "Eval mode must be one of: ask, plan, code." in result.output
 
 
+def test_eval_suite_command_runs_inline_and_file_specs(tmp_path, monkeypatch):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "AGENT_ZERO_BASE_URL=http://localhost:1234/v1",
+                "AGENT_ZERO_API_KEY=test-key",
+                "AGENT_ZERO_MODEL=test-model",
+                "AGENT_ZERO_INPUT_COST_PER_1M_TOKENS=1.0",
+                "AGENT_ZERO_OUTPUT_COST_PER_1M_TOKENS=2.0",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "README.md").write_text("# Agent Zero\n", encoding="utf-8")
+    spec_file = tmp_path / "ask-project.json"
+    spec_file.write_text(
+        json.dumps(
+            {
+                "name": "ask-project",
+                "mode": "ask",
+                "task": "What does this project do?",
+                "expected_terms": ["Agent Zero"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    suite_file = tmp_path / "core.json"
+    suite_file.write_text(
+        json.dumps(
+            {
+                "name": "core",
+                "evals": [
+                    "ask-project.json",
+                    {
+                        "name": "bedrock",
+                        "mode": "ask",
+                        "task": "Explain Bedrock gateway",
+                        "expected_terms": ["Agent Zero"],
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    output_dir = tmp_path / "eval-results"
+    fake_client = FakeModelClient(
+        ModelResponse(
+            content="Agent Zero is a learning project.",
+            input_tokens=100,
+            output_tokens=50,
+            total_tokens=150,
+        )
+    )
+    monkeypatch.setattr(cli, "create_model_client", lambda config: fake_client)
+    monkeypatch.chdir(tmp_path)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        [
+            "eval-suite",
+            str(suite_file),
+            "--output-dir",
+            str(output_dir),
+            "--env-file",
+            str(env_file),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "Eval suite: core" in result.output
+    assert "Total: 2" in result.output
+    assert "Passed: 2" in result.output
+    assert "Failed: 0" in result.output
+    assert "Total tokens: 300" in result.output
+    suite_files = list((output_dir / "suites").glob("*-core.json"))
+    assert len(suite_files) == 1
+    suite_data = json.loads(suite_files[0].read_text(encoding="utf-8"))
+    assert suite_data["success"] is True
+    assert suite_data["total_tokens"] == 300
+    assert suite_data["estimated_cost"] == "$0.000400"
+    assert all(item["run_success"] is True for item in suite_data["evals"])
+    assert all(item["score_passed"] is True for item in suite_data["evals"])
+    assert [item["name"] for item in suite_data["evals"]] == [
+        "ask-project",
+        "bedrock",
+    ]
+    assert len(list(output_dir.glob("*.json"))) == 2
+
+
+def test_eval_suite_command_treats_score_failure_as_failed_eval(tmp_path, monkeypatch):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "AGENT_ZERO_BASE_URL=http://localhost:1234/v1",
+                "AGENT_ZERO_API_KEY=test-key",
+                "AGENT_ZERO_MODEL=test-model",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "README.md").write_text("# Agent Zero\n", encoding="utf-8")
+    suite_file = tmp_path / "core.json"
+    suite_file.write_text(
+        json.dumps(
+            {
+                "name": "core",
+                "evals": [
+                    {
+                        "name": "bedrock",
+                        "mode": "ask",
+                        "task": "Explain Bedrock gateway",
+                        "expected_terms": ["Bedrock"],
+                        "forbidden_terms": ["AWS SDK"],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    output_dir = tmp_path / "eval-results"
+    fake_client = FakeModelClient(
+        ModelResponse(
+            content="Bedrock gateway does not use AWS SDK here.",
+            input_tokens=100,
+            output_tokens=50,
+            total_tokens=150,
+        )
+    )
+    monkeypatch.setattr(cli, "create_model_client", lambda config: fake_client)
+    monkeypatch.chdir(tmp_path)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        [
+            "eval-suite",
+            str(suite_file),
+            "--output-dir",
+            str(output_dir),
+            "--env-file",
+            str(env_file),
+        ],
+    )
+    allowed_result = runner.invoke(
+        app,
+        [
+            "eval-suite",
+            str(suite_file),
+            "--output-dir",
+            str(output_dir),
+            "--env-file",
+            str(env_file),
+            "--allow-failures",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "Passed: 0" in result.output
+    assert "Failed: 1" in result.output
+    assert "- bedrock (score_failed)" in result.output
+    assert allowed_result.exit_code == 0
+    suite_files = sorted((output_dir / "suites").glob("*-core.json"))
+    suite_data = json.loads(suite_files[-1].read_text(encoding="utf-8"))
+    assert suite_data["success"] is False
+    assert suite_data["evals"][0]["success"] is False
+    assert suite_data["evals"][0]["run_success"] is True
+    assert suite_data["evals"][0]["score_passed"] is False
+
+
+def test_eval_suite_command_exits_nonzero_on_failure_unless_allowed(
+    tmp_path, monkeypatch
+):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "AGENT_ZERO_BASE_URL=http://localhost:1234/v1",
+                "AGENT_ZERO_API_KEY=test-key",
+                "AGENT_ZERO_MODEL=test-model",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    suite_file = tmp_path / "core.json"
+    suite_file.write_text(
+        json.dumps(
+            {
+                "name": "core",
+                "evals": [
+                    {
+                        "name": "bad",
+                        "mode": "ask",
+                        "task": "Explain Bedrock gateway",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    output_dir = tmp_path / "eval-results"
+    monkeypatch.setattr(
+        cli,
+        "_run_eval",
+        lambda spec, config, context_budget_tokens, show_context: {
+            "name": spec.name,
+            "mode": spec.mode,
+            "task": spec.task,
+            "provider": config.provider,
+            "model": config.model,
+            "success": False,
+            "status": "model_failed",
+            "selected_files": [],
+            "changed_files": [],
+            "patch_summary": [],
+            "validation": None,
+            "model_calls": [],
+            "response": "boom",
+        },
+    )
+    monkeypatch.chdir(tmp_path)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        [
+            "eval-suite",
+            str(suite_file),
+            "--output-dir",
+            str(output_dir),
+            "--env-file",
+            str(env_file),
+        ],
+    )
+    allowed_result = runner.invoke(
+        app,
+        [
+            "eval-suite",
+            str(suite_file),
+            "--output-dir",
+            str(output_dir),
+            "--env-file",
+            str(env_file),
+            "--allow-failures",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "Failed: 1" in result.output
+    assert "Failed evals:" in result.output
+    assert allowed_result.exit_code == 0
+
+
 def test_eval_report_command_summarizes_saved_results(tmp_path):
     output_dir = tmp_path / "eval-results"
     output_dir.mkdir()
@@ -1803,6 +2073,15 @@ def test_code_command_clarifies_vague_generic_change_before_model(
         "target file or component"
     ]
     assert trace["model_calls"] == []
+    assert [call["name"] for call in trace["tool_calls"]] == [
+        "classify_task",
+        "record_memory",
+        "build_repository_context",
+        "model.complete",
+    ]
+    assert trace["tool_calls"][2]["status"] == "skipped"
+    assert trace["tool_calls"][3]["status"] == "skipped"
+    assert all(isinstance(call["duration_ms"], float) for call in trace["tool_calls"])
 
 
 def test_code_command_clarification_prints_trace_json(tmp_path, monkeypatch):
@@ -1824,6 +2103,7 @@ def test_code_command_clarification_prints_trace_json(tmp_path, monkeypatch):
     assert trace["classification"]["subcategory"] == "documentation_edit"
     assert trace["model_calls"] == []
     assert trace["patch_summary"] == []
+    assert trace["tool_calls"][0]["name"] == "classify_task"
 
 
 def test_code_command_records_clarification_needed_as_rejected_memory(
@@ -1967,6 +2247,20 @@ def test_code_command_dry_run_prints_trace_json(tmp_path, monkeypatch):
     ]
     assert trace["validation"] is None
     assert trace["model_calls"][0]["usage"]["total_tokens"] == 50
+    assert [call["name"] for call in trace["tool_calls"]] == [
+        "classify_task",
+        "load_config",
+        "build_repository_context",
+        "model.complete",
+        "extract_unified_diff",
+        "summarize_unified_diff",
+        "apply_unified_diff",
+        "run_validation",
+        "record_memory",
+    ]
+    assert trace["tool_calls"][6]["status"] == "skipped"
+    assert trace["tool_calls"][7]["status"] == "skipped"
+    assert all(isinstance(call["duration_ms"], float) for call in trace["tool_calls"])
     assert target.read_text(encoding="utf-8") == "old\n"
 
 
@@ -2509,6 +2803,20 @@ def test_code_command_validation_success_prints_trace_json(tmp_path, monkeypatch
     assert trace["validation"]["command"] == ["pytest"]
     assert trace["model_calls"][0]["purpose"] == "initial"
     assert trace["model_calls"][0]["usage"]["total_tokens"] == 50
+    assert [call["name"] for call in trace["tool_calls"]] == [
+        "classify_task",
+        "load_config",
+        "build_repository_context",
+        "model.complete",
+        "extract_unified_diff",
+        "summarize_unified_diff",
+        "apply_unified_diff",
+        "run_validation",
+        "record_memory",
+    ]
+    assert trace["tool_calls"][6]["status"] == "success"
+    assert trace["tool_calls"][7]["output_summary"] == "passed=True"
+    assert all(isinstance(call["duration_ms"], float) for call in trace["tool_calls"])
     assert target.read_text(encoding="utf-8") == "new\n"
 
 

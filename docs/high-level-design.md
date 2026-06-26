@@ -1110,8 +1110,10 @@ Steps:
    Done.
 5. Include code-specific patch summary, dry-run, retry, and validation details.
    Done.
-6. Keep human output unchanged and print the JSON trace at the end. Done.
-7. Extend the same shape to `eval` and saved trace files later.
+6. Add initial code-mode `tool_calls` for classification, context, model,
+   patch, validation, and memory steps. Done.
+7. Keep human output unchanged and print the JSON trace at the end. Done.
+8. Extend the same shape to `eval` and saved trace files later.
 
 Learning outcome:
 

@@ -1,0 +1,13 @@
+{
+  "name": "core",
+  "evals": [
+    "../ask-project.json",
+    {
+      "name": "bedrock-gateway",
+      "mode": "ask",
+      "task": "Explain Bedrock gateway",
+      "expected_terms": ["BedrockGatewayClient", "polling"],
+      "forbidden_terms": ["AWS SDK"]
+    }
+  ]
+}

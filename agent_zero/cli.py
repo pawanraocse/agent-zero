@@ -2,6 +2,7 @@ from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
+import time
 from typing import Literal
 
 import typer
@@ -19,7 +20,14 @@ from agent_zero.diff_summary import (
     format_diff_summary,
     summarize_unified_diff,
 )
-from agent_zero.evals import EvalSpec, EvalSpecError, load_eval_spec, write_eval_result
+from agent_zero.evals import (
+    EvalSpec,
+    EvalSpecError,
+    load_eval_spec,
+    load_eval_suite,
+    write_eval_result,
+    write_eval_suite_result,
+)
 from agent_zero.memory import (
     append_memory_record,
     apply_memory_feedback,
@@ -289,6 +297,34 @@ def _print_trace_json(trace: dict) -> None:
     typer.echo(json.dumps(trace, indent=2, sort_keys=True))
 
 
+def _tool_call_record(
+    name: str,
+    status: str,
+    input_summary: str = "",
+    output_summary: str = "",
+    duration_ms: float | None = None,
+    error: str | None = None,
+) -> dict:
+    record = {
+        "name": name,
+        "status": status,
+        "input_summary": input_summary,
+        "output_summary": output_summary,
+        "duration_ms": duration_ms if duration_ms is not None else 0.0,
+    }
+    if error is not None:
+        record["error"] = error
+    return record
+
+
+def _timer_start() -> float:
+    return time.perf_counter()
+
+
+def _duration_ms(started_at: float) -> float:
+    return round((time.perf_counter() - started_at) * 1000, 3)
+
+
 def _run_trace_json(
     mode: str,
     task: str,
@@ -303,6 +339,7 @@ def _run_trace_json(
     classification: dict | None = None,
     dry_run: bool = False,
     retries: list[dict] | None = None,
+    tool_calls: list[dict] | None = None,
     error: str | None = None,
 ) -> dict:
     decision = repository_context.decision
@@ -335,6 +372,7 @@ def _run_trace_json(
         "classification": classification,
         "dry_run": dry_run,
         "retries": retries or [],
+        "tool_calls": tool_calls or [],
     }
     if error is not None:
         trace["error"] = error
@@ -345,6 +383,7 @@ def _code_clarification_trace_json(
     task: str,
     classification,
     dry_run: bool,
+    tool_calls: list[dict] | None = None,
 ) -> dict:
     return {
         "mode": "code",
@@ -361,6 +400,7 @@ def _code_clarification_trace_json(
         "validation": None,
         "dry_run": dry_run,
         "retries": [],
+        "tool_calls": tool_calls or [],
     }
 
 
@@ -561,18 +601,50 @@ def ask(
     ),
 ) -> None:
     """Answer a repo-aware question without editing files."""
+    started_at = _timer_start()
     config = _load_config_or_exit(env_file)
+    tool_calls = [
+        _tool_call_record(
+            "load_config",
+            "success",
+            output_summary=f"provider={config.provider}, model={config.model}",
+            duration_ms=_duration_ms(started_at),
+        )
+    ]
     resolved_trace_level = _resolve_trace_level(trace, trace_level)
+    started_at = _timer_start()
     user_prompt, repository_context = _build_user_prompt_with_context(
         "User question",
         task,
         context_budget_tokens=context_budget,
     )
+    tool_calls.append(
+        _tool_call_record(
+            "build_repository_context",
+            "success",
+            input_summary=f"context_budget={context_budget}",
+            output_summary=(
+                f"selected={len(repository_context.decision.selected_files)}, "
+                f"included={len(repository_context.decision.included_files)}"
+            ),
+            duration_ms=_duration_ms(started_at),
+        )
+    )
     if show_context:
         _print_context_selection(repository_context)
     if _trace_enabled(resolved_trace_level):
         _print_trace("ask", repository_context, config, resolved_trace_level)
+    started_at = _timer_start()
     response = _complete_with_config(ASK_SYSTEM_PROMPT, user_prompt, config)
+    tool_calls.append(
+        _tool_call_record(
+            "model.complete",
+            "success",
+            input_summary="purpose=initial",
+            output_summary=f"chars={len(response.content)}",
+            duration_ms=_duration_ms(started_at),
+        )
+    )
     model_calls = [
         _model_call_summary(
             purpose="initial",
@@ -584,6 +656,7 @@ def ask(
     ]
     _print_model_response(response, config, ASK_SYSTEM_PROMPT, user_prompt)
     usage = model_calls[0]["usage"]
+    started_at = _timer_start()
     _record_memory(
         mode="ask",
         task=task,
@@ -591,6 +664,14 @@ def ask(
         status="ask_completed",
         success=True,
         usage=usage,
+    )
+    tool_calls.append(
+        _tool_call_record(
+            "record_memory",
+            "success",
+            output_summary="status=ask_completed",
+            duration_ms=_duration_ms(started_at),
+        )
     )
     if trace_json:
         _print_trace_json(
@@ -602,6 +683,7 @@ def ask(
                 status="ask_completed",
                 success=True,
                 model_calls=model_calls,
+                tool_calls=tool_calls,
             )
         )
 
@@ -642,18 +724,50 @@ def plan(
     ),
 ) -> None:
     """Inspect and produce an implementation plan."""
+    started_at = _timer_start()
     config = _load_config_or_exit(env_file)
+    tool_calls = [
+        _tool_call_record(
+            "load_config",
+            "success",
+            output_summary=f"provider={config.provider}, model={config.model}",
+            duration_ms=_duration_ms(started_at),
+        )
+    ]
     resolved_trace_level = _resolve_trace_level(trace, trace_level)
+    started_at = _timer_start()
     user_prompt, repository_context = _build_user_prompt_with_context(
         "Change request",
         task,
         context_budget_tokens=context_budget,
     )
+    tool_calls.append(
+        _tool_call_record(
+            "build_repository_context",
+            "success",
+            input_summary=f"context_budget={context_budget}",
+            output_summary=(
+                f"selected={len(repository_context.decision.selected_files)}, "
+                f"included={len(repository_context.decision.included_files)}"
+            ),
+            duration_ms=_duration_ms(started_at),
+        )
+    )
     if show_context:
         _print_context_selection(repository_context)
     if _trace_enabled(resolved_trace_level):
         _print_trace("plan", repository_context, config, resolved_trace_level)
+    started_at = _timer_start()
     response = _complete_with_config(PLAN_SYSTEM_PROMPT, user_prompt, config)
+    tool_calls.append(
+        _tool_call_record(
+            "model.complete",
+            "success",
+            input_summary="purpose=initial",
+            output_summary=f"chars={len(response.content)}",
+            duration_ms=_duration_ms(started_at),
+        )
+    )
     model_calls = [
         _model_call_summary(
             purpose="initial",
@@ -665,6 +779,7 @@ def plan(
     ]
     _print_model_response(response, config, PLAN_SYSTEM_PROMPT, user_prompt)
     usage = model_calls[0]["usage"]
+    started_at = _timer_start()
     _record_memory(
         mode="plan",
         task=task,
@@ -672,6 +787,14 @@ def plan(
         status="plan_completed",
         success=True,
         usage=usage,
+    )
+    tool_calls.append(
+        _tool_call_record(
+            "record_memory",
+            "success",
+            output_summary="status=plan_completed",
+            duration_ms=_duration_ms(started_at),
+        )
     )
     if trace_json:
         _print_trace_json(
@@ -683,6 +806,7 @@ def plan(
                 status="plan_completed",
                 success=True,
                 model_calls=model_calls,
+                tool_calls=tool_calls,
             )
         )
 
@@ -1111,12 +1235,27 @@ def code(
 ) -> None:
     """Apply a focused code change and validate it."""
     resolved_trace_level = _resolve_trace_level(trace, trace_level)
+    started_at = _timer_start()
     classification = classify_task(task)
+    tool_calls = [
+        _tool_call_record(
+            "classify_task",
+            "success",
+            input_summary=task,
+            output_summary=(
+                f"{classification.action_type}/"
+                f"{classification.recommended_mode}; "
+                f"requires_clarification={classification.requires_clarification}"
+            ),
+            duration_ms=_duration_ms(started_at),
+        )
+    ]
     if _code_request_needs_clarification(classification):
         _print_code_trace(
             "Clarification needed before context selection.", resolved_trace_level
         )
         _print_clarification_needed(classification)
+        started_at = _timer_start()
         _record_memory(
             mode="code",
             task=task,
@@ -1124,28 +1263,85 @@ def code(
             status="clarification_needed",
             success=False,
         )
+        tool_calls.append(
+            _tool_call_record(
+                "record_memory",
+                "success",
+                output_summary="status=clarification_needed",
+                duration_ms=_duration_ms(started_at),
+            )
+        )
+        tool_calls.extend(
+            [
+                _tool_call_record(
+                    "build_repository_context",
+                    "skipped",
+                    output_summary="clarification_needed",
+                    duration_ms=0.0,
+                ),
+                _tool_call_record(
+                    "model.complete",
+                    "skipped",
+                    output_summary="clarification_needed",
+                    duration_ms=0.0,
+                ),
+            ]
+        )
         if trace_json:
             _print_trace_json(
                 _code_clarification_trace_json(
                     task=task,
                     classification=classification,
                     dry_run=dry_run,
+                    tool_calls=tool_calls,
                 )
             )
         raise typer.Exit(code=2)
 
+    started_at = _timer_start()
     config = _load_config_or_exit(env_file)
+    tool_calls.append(
+        _tool_call_record(
+            "load_config",
+            "success",
+            output_summary=f"provider={config.provider}, model={config.model}",
+            duration_ms=_duration_ms(started_at),
+        )
+    )
+    started_at = _timer_start()
     user_prompt, repository_context = _build_user_prompt_with_context(
         "Change request",
         task,
         context_budget_tokens=context_budget,
     )
+    tool_calls.append(
+        _tool_call_record(
+            "build_repository_context",
+            "success",
+            input_summary=f"context_budget={context_budget}",
+            output_summary=(
+                f"selected={len(repository_context.decision.selected_files)}, "
+                f"included={len(repository_context.decision.included_files)}"
+            ),
+            duration_ms=_duration_ms(started_at),
+        )
+    )
     if _trace_enabled(resolved_trace_level):
         _print_trace("code", repository_context, config, resolved_trace_level)
     active_system_prompt = CODE_SYSTEM_PROMPT
     active_user_prompt = user_prompt
+    started_at = _timer_start()
     response = _complete_with_config(active_system_prompt, active_user_prompt, config)
     _print_code_trace("Model response received.", resolved_trace_level)
+    tool_calls.append(
+        _tool_call_record(
+            "model.complete",
+            "success",
+            input_summary="purpose=initial",
+            output_summary=f"chars={len(response.content)}",
+            duration_ms=_duration_ms(started_at),
+        )
+    )
     model_calls = [
         _model_call_summary(
             purpose="initial",
@@ -1159,13 +1355,23 @@ def code(
     usage = model_calls[0]["usage"]
 
     try:
+        started_at = _timer_start()
         diff_text = extract_unified_diff(response.content)
     except DiffExtractionError as exc:
         if is_no_change_response(response.content):
+            tool_calls.append(
+                _tool_call_record(
+                    "extract_unified_diff",
+                    "skipped",
+                    output_summary="model indicated no changes",
+                    duration_ms=0.0,
+                )
+            )
             _print_code_trace("Model indicated no changes.", resolved_trace_level)
             typer.echo("No changes applied.")
             typer.echo(response.content)
             _print_usage(response, config, active_system_prompt, active_user_prompt)
+            started_at = _timer_start()
             _record_memory(
                 mode="code",
                 task=task,
@@ -1173,6 +1379,14 @@ def code(
                 status="no_changes",
                 success=True,
                 usage=usage,
+            )
+            tool_calls.append(
+                _tool_call_record(
+                    "record_memory",
+                    "success",
+                    output_summary="status=no_changes",
+                    duration_ms=_duration_ms(started_at),
+                )
             )
             if trace_json:
                 _print_trace_json(
@@ -1186,12 +1400,22 @@ def code(
                         model_calls=model_calls,
                         classification=classification.to_dict(),
                         dry_run=dry_run,
+                        tool_calls=tool_calls,
                     )
                 )
             return
+        tool_calls.append(
+            _tool_call_record(
+                "extract_unified_diff",
+                "failed",
+                duration_ms=_duration_ms(started_at),
+                error=str(exc),
+            )
+        )
         _print_code_trace("Diff extraction failed.", resolved_trace_level)
         typer.secho(f"Could not find a patch: {exc}", fg=typer.colors.RED, err=True)
         typer.echo(response.content)
+        started_at = _timer_start()
         _record_memory(
             mode="code",
             task=task,
@@ -1199,6 +1423,14 @@ def code(
             status="diff_not_found",
             success=False,
             usage=usage,
+        )
+        tool_calls.append(
+            _tool_call_record(
+                "record_memory",
+                "success",
+                output_summary="status=diff_not_found",
+                duration_ms=_duration_ms(started_at),
+            )
         )
         if trace_json:
             _print_trace_json(
@@ -1212,17 +1444,36 @@ def code(
                     model_calls=model_calls,
                     classification=classification.to_dict(),
                     dry_run=dry_run,
+                    tool_calls=tool_calls,
                     error=str(exc),
                 )
             )
         raise typer.Exit(code=1) from exc
 
     _print_code_trace("Extracted unified diff.", resolved_trace_level)
+    tool_calls.append(
+        _tool_call_record(
+            "extract_unified_diff",
+            "success",
+            output_summary=f"chars={len(diff_text)}",
+            duration_ms=_duration_ms(started_at),
+        )
+    )
+    started_at = _timer_start()
     diff_summary = summarize_unified_diff(diff_text, root=Path.cwd())
     patch_summary = diff_summary_to_dicts(diff_summary)
+    tool_calls.append(
+        _tool_call_record(
+            "summarize_unified_diff",
+            "success",
+            output_summary=f"files={len(patch_summary)}",
+            duration_ms=_duration_ms(started_at),
+        )
+    )
     if not diff_summary_has_changes(diff_summary):
         _print_code_trace("Empty patch rejected.", resolved_trace_level)
         previous_empty_diff = diff_text
+        started_at = _timer_start()
         retry_response, retry_diff_text, retry_diff_summary, retry_prompt = (
             _retry_after_empty_patch(
                 task=task,
@@ -1253,6 +1504,15 @@ def code(
             )
         )
         retries.append({"type": "empty_patch", "status": "recovered"})
+        tool_calls.append(
+            _tool_call_record(
+                "model.complete",
+                "success",
+                input_summary="purpose=empty_patch_retry",
+                output_summary=f"chars={len(response.content)}",
+                duration_ms=_duration_ms(started_at),
+            )
+        )
         patch_summary = diff_summary_to_dicts(diff_summary)
     _print_code_trace(
         f"Patch summary prepared for {len(patch_summary)} file(s).",
@@ -1269,6 +1529,7 @@ def code(
         typer.echo("Proposed patch:")
         typer.echo(diff_text)
         _print_usage(response, config, active_system_prompt, active_user_prompt)
+        started_at = _timer_start()
         _record_memory(
             mode="code",
             task=task,
@@ -1277,6 +1538,28 @@ def code(
             success=True,
             usage=usage,
             patch_summary=patch_summary,
+        )
+        tool_calls.extend(
+            [
+                _tool_call_record(
+                    "apply_unified_diff",
+                    "skipped",
+                    output_summary="dry_run",
+                    duration_ms=0.0,
+                ),
+                _tool_call_record(
+                    "run_validation",
+                    "skipped",
+                    output_summary="dry_run",
+                    duration_ms=0.0,
+                ),
+                _tool_call_record(
+                    "record_memory",
+                    "success",
+                    output_summary="status=dry_run",
+                    duration_ms=_duration_ms(started_at),
+                ),
+            ]
         )
         if trace_json:
             _print_trace_json(
@@ -1292,14 +1575,33 @@ def code(
                     classification=classification.to_dict(),
                     dry_run=True,
                     retries=retries,
+                    tool_calls=tool_calls,
                 )
             )
         return
 
     try:
+        started_at = _timer_start()
         patch_result = apply_unified_diff(Path.cwd(), diff_text)
+        tool_calls.append(
+            _tool_call_record(
+                "apply_unified_diff",
+                "success",
+                output_summary=", ".join(patch_result.changed_files),
+                duration_ms=_duration_ms(started_at),
+            )
+        )
     except PatchApplyError as exc:
+        tool_calls.append(
+            _tool_call_record(
+                "apply_unified_diff",
+                "failed",
+                duration_ms=_duration_ms(started_at),
+                error=str(exc),
+            )
+        )
         _print_code_trace("Patch application failed.", resolved_trace_level)
+        started_at = _timer_start()
         (
             retry_response,
             retry_diff_text,
@@ -1336,6 +1638,23 @@ def code(
             )
         )
         retries.append({"type": "patch_application", "status": "recovered"})
+        tool_calls.extend(
+            [
+                _tool_call_record(
+                    "model.complete",
+                    "success",
+                    input_summary="purpose=patch_application_retry",
+                    output_summary=f"chars={len(response.content)}",
+                    duration_ms=_duration_ms(started_at),
+                ),
+                _tool_call_record(
+                    "apply_unified_diff",
+                    "success",
+                    output_summary=", ".join(patch_result.changed_files),
+                    duration_ms=0.0,
+                ),
+            ]
+        )
         patch_summary = diff_summary_to_dicts(diff_summary)
 
     _print_code_trace(
@@ -1348,7 +1667,22 @@ def code(
         typer.echo(f"- {changed_file}")
     _print_patch_summary(diff_summary)
 
+    started_at = _timer_start()
     validation_result = _run_validation(config)
+    tool_calls.append(
+        _tool_call_record(
+            "run_validation",
+            "success"
+            if validation_result is None or validation_result.passed
+            else "failed",
+            output_summary=(
+                "skipped"
+                if validation_result is None
+                else f"passed={validation_result.passed}"
+            ),
+            duration_ms=_duration_ms(started_at),
+        )
+    )
     _trace_validation_result(validation_result, resolved_trace_level)
     if not _print_validation_result(validation_result, exit_on_failure=False):
         _print_code_trace("Starting validation-fix retry.", resolved_trace_level)
@@ -1361,6 +1695,7 @@ def code(
         )
 
     _print_usage(response, config, active_system_prompt, active_user_prompt)
+    started_at = _timer_start()
     _record_memory(
         mode="code",
         task=task,
@@ -1376,6 +1711,18 @@ def code(
         changed_files=patch_result.changed_files,
         patch_summary=patch_summary,
         validation_passed=validation_result.passed if validation_result else None,
+    )
+    tool_calls.append(
+        _tool_call_record(
+            "record_memory",
+            "success",
+            output_summary=(
+                "status=validation_passed"
+                if validation_result is not None and validation_result.passed
+                else "status=completed"
+            ),
+            duration_ms=_duration_ms(started_at),
+        )
     )
     if trace_json:
         _print_trace_json(
@@ -1397,6 +1744,7 @@ def code(
                 classification=classification.to_dict(),
                 dry_run=False,
                 retries=retries,
+                tool_calls=tool_calls,
             )
         )
 
@@ -1510,6 +1858,124 @@ def eval_command(
     typer.echo(f"Result file: {result_path}")
 
     if not result["success"]:
+        raise typer.Exit(code=1)
+
+
+@app.command("eval-suite")
+def eval_suite_command(
+    suite_file: Path = typer.Argument(..., help="Path to an eval suite JSON file."),
+    output_dir: Path = typer.Option(
+        Path("eval-results"),
+        "--output-dir",
+        help="Directory where eval result JSON files are written.",
+    ),
+    env_file: Path | None = typer.Option(
+        None,
+        "--env-file",
+        help="Optional path to a .env file.",
+    ),
+    context_budget: int = typer.Option(
+        DEFAULT_CONTEXT_BUDGET_TOKENS,
+        "--context-budget",
+        min=1,
+        help="Approximate token budget for selected file contents.",
+    ),
+    allow_failures: bool = typer.Option(
+        False,
+        "--allow-failures",
+        help="Exit zero even when one or more evals fail.",
+    ),
+) -> None:
+    """Run a suite of eval tasks and write an aggregate result."""
+    config = _load_config_or_exit(env_file)
+    try:
+        suite = load_eval_suite(suite_file)
+    except EvalSpecError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2) from exc
+
+    eval_summaries = []
+    total_input_tokens = 0
+    total_output_tokens = 0
+    total_tokens = 0
+    total_cost = 0.0
+    has_cost = False
+
+    for spec in suite.evals:
+        eval_config = config
+        if spec.validation_command is not None:
+            eval_config = config.model_copy(
+                update={"validation_command": spec.validation_command}
+            )
+
+        result = _run_eval(
+            spec,
+            eval_config,
+            context_budget_tokens=context_budget,
+            show_context=False,
+        )
+        result_path = write_eval_result(result, output_dir)
+        usage = _eval_result_usage(result)
+        total_input_tokens += usage["input_tokens"]
+        total_output_tokens += usage["output_tokens"]
+        total_tokens += usage["total_tokens"]
+        cost_value = _parse_cost_value(usage["estimated_cost"])
+        if cost_value is not None:
+            total_cost += cost_value
+            has_cost = True
+
+        score = result.get("score")
+        score_passed = score is None or score.get("passed") is True
+        eval_passed = result["success"] and score_passed
+        eval_summaries.append(
+            {
+                "name": result["name"],
+                "mode": result["mode"],
+                "status": result["status"],
+                "success": eval_passed,
+                "run_success": result["success"],
+                "score_passed": score_passed,
+                "score": score,
+                "result_file": str(result_path),
+                "input_tokens": usage["input_tokens"],
+                "output_tokens": usage["output_tokens"],
+                "total_tokens": usage["total_tokens"],
+                "estimated_cost": usage["estimated_cost"],
+            }
+        )
+
+    failed = [item for item in eval_summaries if not item["success"]]
+    suite_result = {
+        "name": suite.name,
+        "total": len(eval_summaries),
+        "passed": len(eval_summaries) - len(failed),
+        "failed": len(failed),
+        "success": not failed,
+        "input_tokens": total_input_tokens,
+        "output_tokens": total_output_tokens,
+        "total_tokens": total_tokens,
+        "estimated_cost": f"${total_cost:.6f}" if has_cost else "(not available)",
+        "evals": eval_summaries,
+    }
+    suite_result_path = write_eval_suite_result(
+        suite_result,
+        output_dir / "suites",
+    )
+
+    typer.echo(f"Eval suite: {suite.name}")
+    typer.echo(f"Total: {suite_result['total']}")
+    typer.echo(f"Passed: {suite_result['passed']}")
+    typer.echo(f"Failed: {suite_result['failed']}")
+    typer.echo(f"Total tokens: {suite_result['total_tokens']}")
+    typer.echo(f"Estimated cost: {suite_result['estimated_cost']}")
+    if failed:
+        typer.echo("Failed evals:")
+        for item in failed:
+            reason = _eval_suite_failure_reason(item)
+            typer.echo(f"- {item['name']} ({reason})")
+    typer.echo(f"Result file: {suite_result_path}")
+
+    if failed and not allow_failures:
         raise typer.Exit(code=1)
 
 
@@ -1662,6 +2128,14 @@ def _format_eval_score(score: dict) -> str:
         f"{score.get('passed_checks', 0)}/{score.get('total_checks', 0)} "
         f"passed={score.get('passed', False)}"
     )
+
+
+def _eval_suite_failure_reason(summary: dict) -> str:
+    if not summary.get("run_success", False):
+        return summary.get("status", "run_failed")
+    if summary.get("score_passed") is False:
+        return "score_failed"
+    return summary.get("status", "failed")
 
 
 def _run_eval(
