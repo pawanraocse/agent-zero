@@ -84,6 +84,49 @@ def test_ask_command_calls_model_and_prints_response(tmp_path, monkeypatch):
     assert "README.md" in user_prompt
 
 
+def test_classify_command_prints_human_readable_result():
+    runner = CliRunner()
+    result = runner.invoke(app, ["classify", "Explain Bedrock gateway"])
+
+    assert result.exit_code == 0
+    assert "Action type: read" in result.output
+    assert "Recommended mode: ask" in result.output
+    assert "Subcategory: explain_code" in result.output
+    assert "Write intent: none" in result.output
+    assert "Specificity: high" in result.output
+    assert "Requires clarification: False" in result.output
+    assert "Confidence: high" in result.output
+
+
+def test_classify_command_prints_missing_information_for_vague_code_request():
+    runner = CliRunner()
+    result = runner.invoke(app, ["classify", "Add a short README note"])
+
+    assert result.exit_code == 0
+    assert "Action type: write" in result.output
+    assert "Recommended mode: code" in result.output
+    assert "Subcategory: documentation_edit" in result.output
+    assert "Requires clarification: True" in result.output
+    assert "Missing information:" in result.output
+    assert "- exact documentation text or topic" in result.output
+
+
+def test_classify_command_prints_json():
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        ["classify", "Plan architecture for hybrid memory", "--json"],
+    )
+
+    assert result.exit_code == 0
+    data = json.loads(result.output)
+    assert data["action_type"] == "plan"
+    assert data["recommended_mode"] == "plan"
+    assert data["subcategory"] == "architecture_plan"
+    assert data["write_intent"] == "none"
+    assert data["requires_clarification"] is False
+
+
 def test_ask_command_show_context_prints_selection_reasons(tmp_path, monkeypatch):
     env_file = tmp_path / ".env"
     env_file.write_text(
@@ -121,6 +164,62 @@ def test_ask_command_show_context_prints_selection_reasons(tmp_path, monkeypatch
     assert "SQLite memory: not found" in result.output
     assert "- README.md: overview prior" in result.output
     assert "ok" in result.output
+
+
+def test_ask_command_prints_trace_json(tmp_path, monkeypatch):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "AGENT_ZERO_BASE_URL=http://localhost:1234/v1",
+                "AGENT_ZERO_API_KEY=test-key",
+                "AGENT_ZERO_MODEL=test-model",
+                "AGENT_ZERO_INPUT_COST_PER_1M_TOKENS=1.0",
+                "AGENT_ZERO_OUTPUT_COST_PER_1M_TOKENS=2.0",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "README.md").write_text("# Agent Zero\n", encoding="utf-8")
+    fake_client = FakeModelClient(
+        ModelResponse(
+            content="ok",
+            input_tokens=10,
+            output_tokens=5,
+            total_tokens=15,
+        )
+    )
+    monkeypatch.setattr(cli, "create_model_client", lambda config: fake_client)
+    monkeypatch.chdir(tmp_path)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        [
+            "ask",
+            "What does this project do?",
+            "--trace-json",
+            "--env-file",
+            str(env_file),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "Trace JSON:" in result.output
+    trace = json.loads(result.output.split("Trace JSON:\n", maxsplit=1)[1])
+    assert trace["mode"] == "ask"
+    assert trace["task"] == "What does this project do?"
+    assert trace["status"] == "ask_completed"
+    assert trace["success"] is True
+    assert trace["provider"] == "openai"
+    assert trace["model"] == "test-model"
+    assert trace["context"]["selected_files"] == ["README.md"]
+    assert trace["context"]["context_budget_tokens"] == 8000
+    assert trace["model_calls"][0]["purpose"] == "initial"
+    assert trace["model_calls"][0]["usage"]["input_tokens"] == 10
+    assert trace["model_calls"][0]["usage"]["estimated_cost"] == "$0.000020"
+    assert trace["changed_files"] == []
+    assert trace["validation"] is None
 
 
 def test_ask_command_accepts_context_budget(tmp_path, monkeypatch):
@@ -539,6 +638,45 @@ def test_plan_command_show_context_prints_selection_reasons(tmp_path, monkeypatc
     assert "Query terms: add, readme, details" in result.output
     assert "- README.md:" in result.output
     assert "1. Summary" in result.output
+
+
+def test_plan_command_prints_trace_json(tmp_path, monkeypatch):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "AGENT_ZERO_BASE_URL=http://localhost:1234/v1",
+                "AGENT_ZERO_API_KEY=test-key",
+                "AGENT_ZERO_MODEL=test-model",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "README.md").write_text("# Agent Zero\n", encoding="utf-8")
+    fake_client = FakeModelClient(ModelResponse(content="1. Summary"))
+    monkeypatch.setattr(cli, "create_model_client", lambda config: fake_client)
+    monkeypatch.chdir(tmp_path)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        [
+            "plan",
+            "Plan README update",
+            "--trace-json",
+            "--env-file",
+            str(env_file),
+        ],
+    )
+
+    assert result.exit_code == 0
+    trace = json.loads(result.output.split("Trace JSON:\n", maxsplit=1)[1])
+    assert trace["mode"] == "plan"
+    assert trace["task"] == "Plan README update"
+    assert trace["status"] == "plan_completed"
+    assert trace["success"] is True
+    assert trace["context"]["selected_files"] == ["README.md"]
+    assert trace["model_calls"][0]["purpose"] == "initial"
 
 
 def test_plan_command_trace_prints_agent_timeline(tmp_path, monkeypatch):
@@ -1615,7 +1753,7 @@ def test_code_command_accepts_context_budget(tmp_path, monkeypatch):
         app,
         [
             "code",
-            "Update README.md",
+            "Update README.md saying Agent Zero is a learning harness",
             "--context-budget",
             "10",
             "--dry-run",
@@ -1628,6 +1766,42 @@ def test_code_command_accepts_context_budget(tmp_path, monkeypatch):
     assert result.exit_code == 0
     assert "Applied context budget: 10 tokens" in result.output
     assert "### README.md (truncated)" in fake_client.calls[0][1]
+
+
+def test_code_command_clarifies_vague_documentation_request_before_config(
+    tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+
+    result = runner.invoke(app, ["code", "Add a short README note", "--trace"])
+
+    assert result.exit_code == 2
+    assert "Code trace: Clarification needed before context selection." in result.output
+    assert "Clarification needed:" in result.output
+    assert "- exact documentation text or topic" in result.output
+    assert "Recommended mode: code" in result.output
+    assert "No model call made." in result.output
+    assert "AGENT_ZERO_API_KEY" not in result.output
+
+
+def test_code_command_records_clarification_needed_as_rejected_memory(
+    tmp_path, monkeypatch
+):
+    monkeypatch.delenv("AGENT_ZERO_DISABLE_MEMORY", raising=False)
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+
+    result = runner.invoke(app, ["code", "Add a short README note"])
+
+    assert result.exit_code == 2
+    records = load_memory(tmp_path)
+    assert records[-1]["status"] == "clarification_needed"
+    assert records[-1]["success"] is False
+    assert records[-1]["selected_files"] == []
+    items = load_memory_items(tmp_path)
+    assert items[-1]["status"] == "rejected"
+    assert "clarification_needed" in items[-1]["claim"]
 
 
 def test_code_command_dry_run_prints_patch_without_changing_files(

@@ -1035,6 +1035,86 @@ Learning outcome:
   changes improved quality, cost, or file selection without opening each JSON
   result manually.
 
+### Milestone 43: Request Classification
+
+Goal: make routing and write risk explicit before Agent Hub.
+
+Steps:
+
+1. Add `python -m agent_zero classify "..."`. Done.
+2. Use top-level action types `read`, `plan`, and `write`. Done.
+3. Add subcategories such as `explain_code`, `architecture_plan`,
+   `documentation_edit`, and `possible_write`. Done.
+4. Report write intent, specificity, missing information, clarification need,
+   confidence, and reason. Done.
+5. Report the recommended Agent Zero mode, such as `ask`, `plan`, `code`, or
+   `memory`. Done.
+6. Add JSON output for future hub automation. Done.
+
+Learning outcome:
+
+- Understand that routing should start with action risk: read-only, planning,
+  or write-capable. A classifier does not replace explicit CLI modes today, but
+  it teaches the first decision an Agent Hub will need before dispatching work
+  to specialized agents.
+
+### Milestone 44: Clarification Detection
+
+Goal: avoid acting when a write request is underspecified.
+
+Steps:
+
+1. Run deterministic classification at the start of `code` mode. Done.
+2. Stop vague documentation edits and continuation requests before config
+   loading, context selection, model calls, patching, or validation. Done.
+3. Print missing information for the user. Done.
+4. Record `clarification_needed` as rejected low-risk memory. Done.
+5. Keep specific edit requests on the normal code path. Done.
+
+Learning outcome:
+
+- A safe agent harness needs a "do not act yet" path. This keeps ambiguous
+  requests from becoming model guesses, patch failures, or misleading memory.
+
+### Milestone 45: Stale Hunk Relocation
+
+Goal: reduce patch brittleness when a model produces a unified diff with a
+stale line number but exact matching context still exists in the target file.
+
+Steps:
+
+1. Try the hunk at the line number from the unified diff. Done.
+2. If the hunk does not match there, search for the same original hunk lines
+   later in the file. Done.
+3. Apply only when the original context lines match exactly. Done.
+4. Keep mismatch failures when the expected text is absent. Done.
+5. Add a focused unit test for stale line number relocation. Done.
+
+Learning outcome:
+
+- Patch reliability does not have to mean trusting vague edits. The harness can
+  be tolerant of stale line anchors while still requiring exact file context.
+
+### Milestone 46: Read-Only Trace JSON
+
+Goal: make read-only agent runs inspectable by software, not only by humans
+reading terminal text.
+
+Steps:
+
+1. Add `--trace-json` to `ask`. Done.
+2. Add `--trace-json` to `plan`. Done.
+3. Include mode, task, provider, model, status, success, context selection,
+   retrieval reasons, model calls, usage, changed files, and validation fields.
+   Done.
+4. Keep human output unchanged and print the JSON trace at the end. Done.
+5. Extend the same shape to `code`, `eval`, and saved trace files later.
+
+Learning outcome:
+
+- Human traces explain what happened. JSON traces make the same run observable
+  by eval suites, dashboards, and future Agent Hub routing/debugging tools.
+
 ## Suggested Implementation Order
 
 Build in this order:
@@ -1086,6 +1166,10 @@ Build in this order:
 45. User feedback memory.
 46. Feedback phrase detection.
 47. Eval report command.
+48. Request classification.
+49. Clarification detection.
+50. Stale hunk relocation.
+51. Read-only trace JSON.
 
 Each step should leave the project runnable.
 

@@ -1,0 +1,589 @@
+# Agent Zero Testing Plan
+
+This testing plan is a step-by-step lab for understanding Agent Zero. Run the
+tests in order when you want to see how the agent works internally.
+
+The goal is not only "does it pass?" The goal is to observe what the agent
+selects, sends, changes, validates, remembers, and measures.
+
+## Before You Start
+
+Activate the virtual environment:
+
+```bash
+source .venv/bin/activate
+```
+
+Check the CLI loads:
+
+```bash
+python -m agent_zero --help
+```
+
+Check your environment:
+
+```bash
+python -m agent_zero ask "What model and provider are configured?" --trace
+```
+
+Expected learning:
+
+- `python -m agent_zero` runs the package as a module.
+- Config is loaded before the agent builds context.
+- `--trace` shows the high-level execution timeline.
+
+## Test 1: Repository-Aware Ask
+
+Run:
+
+```bash
+python -m agent_zero ask "What does this project do?"
+```
+
+Observe:
+
+- Does the answer mention Agent Zero as a learning-focused coding agent?
+- Does it mention ask, plan, code, eval, or memory?
+- Does it print token and cost output?
+
+Expected learning:
+
+- Ask mode answers from repository context.
+- Ask mode does not edit files.
+- Usage/cost is shown after the model response.
+
+## Test 2: Context Selection Visibility
+
+Run:
+
+```bash
+python -m agent_zero ask "Explain Bedrock gateway" --show-context
+```
+
+Observe:
+
+- Query terms.
+- Whether repo index was used.
+- Whether learning memory was used.
+- Which files were selected.
+- Why each file was selected.
+
+Expected learning:
+
+- Retrieval happens before the model call.
+- Selected files are chosen using text search, repo index, path priority, and
+  memory signals.
+- The model receives selected context, not the whole repository.
+
+## Test 3: Trace The Ask Flow
+
+Run:
+
+```bash
+python -m agent_zero ask "Explain Bedrock gateway" --trace
+```
+
+Machine-readable trace:
+
+```bash
+python -m agent_zero ask "Explain Bedrock gateway" --trace-json
+```
+
+Observe:
+
+- Config loading.
+- File listing.
+- Text search.
+- Repo index loading.
+- Memory loading.
+- Selected files.
+- Context budget application.
+- Model call.
+- In JSON trace: mode, task, status, selected files, context budget, reasons,
+  model calls, usage, and success.
+
+Expected learning:
+
+- `--trace` shows the agent loop without dumping all internals.
+- It helps explain what happened before the answer appeared.
+- `--trace-json` turns the same run into data a future hub or dashboard can
+  inspect.
+
+## Test 4: Context Budget Impact
+
+Run:
+
+```bash
+python -m agent_zero ask "Explain Bedrock gateway polling" --show-context --trace --context-budget 400
+```
+
+Then run:
+
+```bash
+python -m agent_zero ask "Explain Bedrock gateway polling" --show-context --trace --context-budget 1200
+```
+
+Observe:
+
+- Selected content size.
+- Included content files.
+- Truncated files.
+- Skipped files.
+- Token and cost output.
+- Whether the answer becomes more detailed.
+
+Expected learning:
+
+- Smaller budgets reduce cost but may hide implementation details.
+- Larger budgets give the model more evidence but cost more.
+- Context budgeting is one of the core tradeoffs in coding agents.
+
+## Test 5: Build Or Refresh Repo Index
+
+Run:
+
+```bash
+python -m agent_zero index
+```
+
+Then:
+
+```bash
+python -m agent_zero ask "Explain Bedrock gateway" --show-context
+```
+
+Observe:
+
+- Repo index should show as used.
+- Context reasons may include index concept matches, symbol matches, summary
+  matches, or relationship matches.
+
+Expected learning:
+
+- The repo index is a compact narrative map of the repository.
+- It is not embeddings.
+- It helps retrieval explain why files are related.
+
+## Test 6: Plan Mode
+
+Run:
+
+```bash
+python -m agent_zero plan "Add support for a new model provider"
+```
+
+Observe:
+
+- Summary.
+- Relevant files.
+- Implementation steps.
+- Validation steps.
+- Risks and unknowns.
+- Confidence score.
+
+Expected learning:
+
+- Plan mode uses repository context but does not edit files.
+- Planning is useful before code mode when the task is larger or unclear.
+
+## Test 7: Clarification Before Code
+
+Run:
+
+```bash
+python -m agent_zero code "Add a short harmless README note" --dry-run --trace
+```
+
+Observe:
+
+- Clarification needed.
+- Missing information.
+- No model call made.
+- No patch or validation step.
+
+Expected learning:
+
+- Vague write requests should stop before spending tokens.
+- Clarification is safer than asking the model to guess what to edit.
+
+## Test 8: Code Mode Dry Run
+
+Run:
+
+```bash
+python -m agent_zero code "Add one sentence to README.md saying Agent Zero is built for learning agent internals" --dry-run --trace
+```
+
+Observe:
+
+- Selected files.
+- Model response received.
+- Unified diff extraction.
+- Patch summary.
+- Proposed patch.
+- No files changed.
+
+Expected learning:
+
+- Dry run lets you inspect patches before applying them.
+- Code mode expects a unified diff from the model.
+- Patch summary is deterministic and generated by the harness.
+
+## Test 9: Code Mode With Validation
+
+Run a small README change only when you are comfortable applying a local edit:
+
+```bash
+python -m agent_zero code "Add one sentence to README.md saying Agent Zero is built for learning agent internals" --trace
+```
+
+Observe:
+
+- Patch application.
+- Changed files.
+- Patch summary.
+- Validation steps.
+- Memory update after success.
+
+Expected learning:
+
+- Code mode applies the model patch.
+- Validation runs after patch application.
+- Successful code runs can produce useful memory signals.
+
+## Test 10: Memory Inspection
+
+Run:
+
+```bash
+python -m agent_zero memory
+```
+
+Observe:
+
+- Raw memory record count.
+- SQLite memory item count.
+- Confirmed items.
+- Candidate items.
+- Rejected items.
+
+Expected learning:
+
+- Raw JSONL is the audit log.
+- SQLite memory is curated retrieval memory.
+- Candidate and rejected memory do not boost retrieval.
+- Confirmed memory can influence future file selection.
+
+## Test 11: Feedback Memory
+
+Dry run feedback detection:
+
+```bash
+python -m agent_zero memory --detect-feedback "it worked"
+```
+
+Apply feedback only when you want to update memory:
+
+```bash
+python -m agent_zero memory --detect-feedback "it worked" --yes
+```
+
+Observe:
+
+- Detected feedback.
+- Whether memory was updated.
+- Updated status and confidence.
+
+Expected learning:
+
+- User feedback is different from test validation.
+- Feedback can promote or reject memory.
+- Detection is dry-run by default for safety.
+
+## Test 12: Memory Hygiene
+
+Dry run pruning rejected memory:
+
+```bash
+python -m agent_zero memory --prune
+```
+
+Apply pruning:
+
+```bash
+python -m agent_zero memory --prune --yes
+```
+
+Try protected confirmed memory:
+
+```bash
+python -m agent_zero memory --status confirmed --prune --yes
+```
+
+Expected learning:
+
+- Low-value memory can be cleaned up.
+- Confirmed memory is protected.
+- Memory maintenance should be explicit and reversible in intent.
+
+## Test 13: Ad-Hoc Eval
+
+Run:
+
+```bash
+python -m agent_zero eval --mode ask "Explain Bedrock gateway" \
+  --expect BedrockGatewayClient \
+  --expect polling \
+  --forbid "AWS SDK"
+```
+
+Observe:
+
+- Eval name.
+- Mode.
+- Status.
+- Success.
+- Score.
+- Result file path.
+
+Expected learning:
+
+- Eval is a measurement run.
+- `--expect` and `--forbid` are deterministic checks.
+- The result JSON stores the response, usage, score, selected files, and status.
+
+## Test 14: Eval Context Experiment
+
+Run:
+
+```bash
+python -m agent_zero eval --mode ask "Explain Bedrock gateway polling status checks" \
+  --show-context \
+  --context-budget 400 \
+  --expect status \
+  --expect polling
+```
+
+Then run:
+
+```bash
+python -m agent_zero eval --mode ask "Explain Bedrock gateway polling status checks" \
+  --show-context \
+  --context-budget 1200 \
+  --expect status \
+  --expect polling
+```
+
+Observe:
+
+- Score.
+- Token usage.
+- Cost.
+- Included files.
+- Answer quality.
+
+Expected learning:
+
+- Evals make context budget experiments comparable.
+- A bigger context is not automatically better.
+- The useful question is: did quality improve enough to justify cost?
+
+## Test 15: Eval Report
+
+Run:
+
+```bash
+python -m agent_zero eval-report
+```
+
+Filter one eval family:
+
+```bash
+python -m agent_zero eval-report --name ad-hoc-ask-explain-bedrock-gateway
+```
+
+Machine-readable output:
+
+```bash
+python -m agent_zero eval-report --json
+```
+
+Observe:
+
+- Score summary.
+- Tokens.
+- Cost.
+- Selected file count.
+- Changed file count.
+
+Expected learning:
+
+- Eval JSON files are raw evidence.
+- Eval report turns raw evidence into a comparison view.
+
+## Test 16: Failure Case - Empty Patch
+
+Run a request that may already be satisfied:
+
+```bash
+python -m agent_zero code "Add one sentence to README.md saying Agent Zero is a learning project" --dry-run --trace
+```
+
+Observe:
+
+- Whether the model returns an empty patch.
+- Whether Agent Zero rejects the empty patch.
+- Whether it retries once.
+
+Expected learning:
+
+- Coding agents need guardrails for no-op or low-quality patches.
+- Empty patches should not be treated as successful code changes.
+
+## Test 17: Failure Case - Patch Context Mismatch
+
+Run a README edit with a small context budget:
+
+```bash
+python -m agent_zero code "Append one sentence to the end of README.md: Validation supports tests, lint, and format checks." --context-budget 400 --trace
+```
+
+Observe:
+
+- Patch application failure.
+- Retry attempt.
+- Whether increasing context budget helps.
+
+Then try:
+
+```bash
+python -m agent_zero code "Append one sentence to the end of README.md: Validation supports tests, lint, and format checks." --context-budget 12000 --trace
+```
+
+Expected learning:
+
+- Patch application depends on exact context.
+- Too little context can produce weak patch anchors.
+- Increasing context can improve patch reliability, at higher cost.
+
+## Test 18: Validation Commands
+
+Check `.env` validation settings:
+
+```bash
+python -m agent_zero code "Add one sentence to README.md saying validation can run tests, lint, and format checks" --dry-run --trace
+```
+
+Then inspect configured validation commands:
+
+```bash
+grep AGENT_ZERO_ .env
+```
+
+Expected learning:
+
+- Validation can be one command or layered test/lint/format commands.
+- Dry run skips patch application and validation.
+- Real code mode runs validation after applying the patch.
+
+## Test 19: Full Local Regression
+
+Run:
+
+```bash
+.venv/bin/python -m pytest
+.venv/bin/python -m ruff format --check .
+.venv/bin/python -m ruff check .
+```
+
+Expected learning:
+
+- Unit tests protect harness behavior.
+- Ruff format protects style consistency.
+- Ruff check catches lint issues.
+
+## Test 20: Read Result JSON
+
+After an eval, inspect the latest result:
+
+```bash
+ls -t eval-results | head
+```
+
+Then open one JSON file:
+
+```bash
+cat eval-results/<result-file>.json
+```
+
+Observe:
+
+- `selected_files`.
+- `model_calls`.
+- `usage`.
+- `score`.
+- `response`.
+- `validation`.
+- `patch_summary`.
+
+Expected learning:
+
+- Eval results are the best way to debug what changed between runs.
+- They are also the foundation for future dashboards and eval suites.
+
+## Test 21: End-To-End Learning Loop
+
+Run this sequence:
+
+```bash
+python -m agent_zero index
+python -m agent_zero ask "Explain Bedrock gateway" --show-context --trace --context-budget 400
+python -m agent_zero eval --mode ask "Explain Bedrock gateway" --expect BedrockGatewayClient --forbid "AWS SDK"
+python -m agent_zero eval-report --name ad-hoc-ask-explain-bedrock-gateway
+python -m agent_zero memory
+```
+
+Expected learning:
+
+- Index helps retrieval.
+- Ask uses selected context.
+- Eval records measurable behavior.
+- Eval report compares saved runs.
+- Memory shows what the agent learned or rejected.
+
+## What To Record Manually
+
+For each experiment, write down:
+
+- Prompt.
+- Context budget.
+- Selected files.
+- Included files.
+- Score.
+- Input tokens.
+- Output tokens.
+- Estimated cost.
+- Whether memory changed.
+- Whether validation passed.
+- What surprised you.
+
+This manual log is useful until Agent Zero has a richer eval-suite comparison
+system.
+
+## Recommended Test Order For New Features
+
+When adding a new feature:
+
+1. Run the closest existing eval.
+2. Implement the feature.
+3. Run unit tests.
+4. Run the same eval again.
+5. Compare with `eval-report`.
+6. Inspect memory.
+7. Update README or HLD if the behavior is part of the learning story.
+
+The key question is always:
+
+```text
+Did the agent become more reliable, more observable, cheaper, or easier to understand?
+```

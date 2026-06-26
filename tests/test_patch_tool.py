@@ -24,6 +24,27 @@ def test_apply_unified_diff_updates_existing_file(tmp_path):
     assert target.read_text(encoding="utf-8") == "one\nTWO\nthree\n"
 
 
+def test_apply_unified_diff_relocates_hunk_when_line_number_is_stale(tmp_path):
+    target = tmp_path / "hello.txt"
+    target.write_text("intro\none\ntwo\nthree\n", encoding="utf-8")
+
+    result = apply_unified_diff(
+        tmp_path,
+        """diff --git a/hello.txt b/hello.txt
+--- a/hello.txt
++++ b/hello.txt
+@@ -1,3 +1,3 @@
+ one
+-two
++TWO
+ three
+""",
+    )
+
+    assert result.changed_files == ["hello.txt"]
+    assert target.read_text(encoding="utf-8") == "intro\none\nTWO\nthree\n"
+
+
 def test_apply_unified_diff_creates_new_text_file(tmp_path):
     result = apply_unified_diff(
         tmp_path,

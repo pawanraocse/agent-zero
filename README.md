@@ -5,7 +5,8 @@ Build a coding agent from scratch, one visible step at a time.
 Agent Zero is a small educational coding agent built to understand how tools
 like Claude Code, Codex, Cursor, and other agentic coding systems work under
 the hood. It is not trying to be the most powerful agent. It is trying to be
-the clearest one.
+the clearest one. Agent Zero teaches coding agent internals through a visible, step-by-step harness.
+Agent Zero is built for learning agent internals.
 
 **Note:** This is a learning project first. It prioritizes clarity and visibility over production features.
 
@@ -95,7 +96,8 @@ that direction.
 
 Completed:
 
-- CLI modes: `ask`, `plan`, `code`, `eval`, `eval-report`, and `index`.
+- CLI modes: `ask`, `plan`, `code`, `classify`, `eval`, `eval-report`, and
+  `index`.
 - Providers: OpenAI-compatible APIs and an async Bedrock gateway.
 - Repository retrieval: file listing, text search, repo index, learning memory,
   confirmed SQLite memory, target-file narrowing, and relevance explanations.
@@ -104,19 +106,26 @@ Completed:
 - Coding loop: unified diff extraction, safe patch application, dry-run mode,
   validation, one validation-fix retry, empty-patch retry, and patch-application
   retry.
+- Patch reliability: stale hunk line numbers can be relocated when the original
+  hunk context still matches exactly.
 - Validation: single validation command or layered test, lint, and format
   commands.
 - Observability: `--show-context`, `--trace`, `--trace-level`, patch summaries,
-  changed Python symbols, token usage, cost output, eval reports, and memory
-  inspection.
+  read-only `--trace-json`, patch summaries, changed Python symbols, token
+  usage, cost output, eval reports, and memory inspection.
 - Local learning: `.agent-zero/memory.jsonl`, reflection records, confidence
   labels, duplicate compaction, memory hygiene, SQLite memory candidates, and
   confirmed-memory retrieval boosts.
 - Memory maintenance: inspect memory, dry-run pruning, and confirmed deletion of
   low-value rejected/candidate memory, plus explicit memory reset.
+- Agent Hub prep: deterministic request classification by action type,
+  recommended mode, subcategory, write intent, specificity, clarification need,
+  and early clarification blocking for vague write requests.
 
 Pending:
 
+- `--trace-json` for `code` and `eval`, including patch and validation details.
+- Optional saved trace files under `.agent-zero/traces/`.
 - Semantic memory retrieval using embeddings or a graph index.
 - Stronger eval suites that repeatedly test ask, plan, code, retries, Bedrock,
   and memory behavior.
@@ -126,12 +135,14 @@ Pending:
 
 Recommended next milestone:
 
-> Add stronger eval suites that repeatedly test ask, plan, code, retries,
-> Bedrock, and memory behavior.
+> Extend `--trace-json` to `code` mode so patch application, retries,
+> validation, and changed files become machine-readable.
 
 Detailed roadmap:
 
 - See `docs/project-todo.md` for the full implementation and testing TODO.
+- See `docs/agent-hub-prep-todo.md` for improvements to try before building
+  Agent Hub.
 - See `docs/testing-plan.md` for a step-by-step manual testing lab.
 
 ### Why Two Memory Stores?
@@ -648,6 +659,17 @@ Agent trace:
 `--show-context` explains why files were selected. `--trace` explains what the
 agent did in order.
 
+For machine-readable traces in read-only modes, use `--trace-json`:
+
+```bash
+python -m agent_zero ask "Explain Bedrock gateway" --trace-json
+python -m agent_zero plan "Add a new provider" --trace-json
+```
+
+This prints a JSON trace with mode, task, provider, model, selected files,
+included/skipped/truncated files, context budget, retrieval reasons, model call
+usage, status, and success.
+
 For deeper debugging, use `--trace-level debug`:
 
 ```bash
@@ -660,6 +682,50 @@ Trace levels:
 - `basic`: high-level steps. This is what `--trace` enables.
 - `debug`: high-level steps plus selected-file reasons and included content
   sizes.
+
+### Classify Mode
+
+Use `classify` to inspect how Agent Zero understands a request before a future
+Agent Hub routes it to an agent:
+
+```bash
+python -m agent_zero classify "Explain Bedrock gateway"
+python -m agent_zero classify "Add a short README note"
+python -m agent_zero classify "proceed"
+```
+
+The classifier is deterministic and model-free. It separates action risk from
+the Agent Zero command that should handle the request.
+
+| Action type | Meaning | Recommended mode |
+| --- | --- |
+| `read` | read-only answer or explanation | `ask` |
+| `plan` | read-only planning before action | `plan` |
+| `write` | repository change, memory update, or possible write | `code` or `memory` |
+
+It also reports subcategory, write intent, specificity, missing information,
+and whether clarification is required.
+
+Example:
+
+```text
+Action type: write
+Recommended mode: code
+Subcategory: documentation_edit
+Write intent: explicit
+Specificity: low
+Requires clarification: True
+Missing information:
+- exact documentation text or topic
+Confidence: medium
+Reason: The request has edit intent but is missing details needed to act safely.
+```
+
+Use JSON output when another tool or future hub needs to consume the decision:
+
+```bash
+python -m agent_zero classify "Plan architecture for hybrid memory" --json
+```
 
 ### Plan Mode
 
@@ -1709,6 +1775,112 @@ Learning outcome:
   command turns timestamped JSON files into a quick view of score, cost, context
   size, and changed-file behavior across runs.
 
+### Milestone 43: Request Classification
+
+Goal: make action risk explicit before Agent Hub.
+
+Built:
+
+- `python -m agent_zero classify "..."`.
+- Top-level action types: `read`, `plan`, and `write`.
+- Recommended Agent Zero modes: `ask`, `plan`, `code`, or `memory`.
+- Subcategories such as `explain_code`, `architecture_plan`,
+  `documentation_edit`, and `possible_write`.
+- Write intent, specificity, missing information, clarification need,
+  confidence, and reason.
+- `--json` output for future automation.
+
+Learning outcome:
+
+- Routing should begin with whether the request is read-only, planning-only, or
+  write-capable. This classifier does not replace explicit CLI modes, but it
+  teaches the first decision an Agent Hub needs before dispatching to
+  specialized agents.
+
+### Milestone 44: Clarification Detection
+
+Goal: stop vague write requests before they spend tokens or ask the model to
+guess.
+
+Built:
+
+- `code` mode now checks the deterministic classifier before config loading,
+  context selection, or model calls.
+- Vague documentation requests such as `Add a short README note` return
+  `clarification_needed`.
+- The CLI prints the missing information and confirms that no model call was
+  made.
+- Clarification-needed runs are recorded as rejected low-risk memory, not as
+  useful retrieval lessons.
+
+Example:
+
+```bash
+python -m agent_zero code "Add a short README note" --trace
+```
+
+Expected output shape:
+
+```text
+Code trace: Clarification needed before context selection.
+Clarification needed:
+- exact documentation text or topic
+Recommended mode: code
+Subcategory: documentation_edit
+No model call made.
+```
+
+Learning outcome:
+
+- A coding agent should not treat every write-shaped request as permission to
+  act. Sometimes the most useful agent behavior is to stop early and ask for
+  the missing decision.
+
+### Milestone 45: Stale Hunk Relocation
+
+Goal: make patch application less brittle when the model uses a stale hunk line
+number but the exact target context still exists in the file.
+
+Built:
+
+- The patch engine first tries the hunk at the line number provided by the
+  unified diff.
+- If that location does not match, it searches the remaining file for the exact
+  same original hunk lines.
+- The patch is applied only when the context matches exactly.
+- A focused unit test covers the stale-line-number case.
+
+Learning outcome:
+
+- Coding agents often produce reasonable diffs with weak line anchors. A safe
+  harness can tolerate stale hunk headers without becoming unsafe, as long as it
+  still requires exact context.
+
+### Milestone 46: Read-Only Trace JSON
+
+Goal: make read-only agent runs inspectable by software, not only by humans
+reading terminal text.
+
+Built:
+
+- `--trace-json` for `ask`.
+- `--trace-json` for `plan`.
+- JSON trace fields for mode, task, provider, model, status, success, context
+  selection, retrieval reasons, model calls, usage, changed files, and
+  validation.
+- Human output remains unchanged; the trace JSON is printed at the end.
+
+Example:
+
+```bash
+python -m agent_zero ask "Explain Bedrock gateway" --trace-json
+```
+
+Learning outcome:
+
+- Human traces explain what happened. JSON traces let future eval suites,
+  dashboards, and Agent Hub tooling inspect the same run as structured data.
+
 ## Design Principles
 
 Agent Zero follows a few rules:
@@ -1857,5 +2029,7 @@ Agent Zero is small on purpose.
 The goal is not to hide the agent loop behind abstractions. The goal is to make
 the loop visible enough that you can point at every step and say: I know what
 the agent is doing, why it is doing it, and how to improve it.
+
+Validation supports tests, lint, and format checks.
 
 Validation supports tests, lint, and format checks.

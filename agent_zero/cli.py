@@ -39,6 +39,7 @@ from agent_zero.repo_index import (
     index_relationship_count,
     write_repo_index,
 )
+from agent_zero.task_classifier import classify_task
 from agent_zero.tools.command_tool import CommandRunError, CommandResult, run_command
 from agent_zero.tools.patch_tool import PatchApplyError, apply_unified_diff
 from agent_zero.usage import estimate_usage_cost, format_usage_cost, resolve_token_usage
@@ -282,6 +283,56 @@ def _print_debug_trace(repository_context) -> None:
     typer.echo("")
 
 
+def _print_trace_json(trace: dict) -> None:
+    typer.echo("")
+    typer.echo("Trace JSON:")
+    typer.echo(json.dumps(trace, indent=2, sort_keys=True))
+
+
+def _run_trace_json(
+    mode: str,
+    task: str,
+    config,
+    repository_context,
+    status: str,
+    success: bool,
+    model_calls: list[dict] | None = None,
+    changed_files: list[str] | None = None,
+    validation: ValidationResult | None = None,
+    error: str | None = None,
+) -> dict:
+    decision = repository_context.decision
+    trace = {
+        "mode": mode,
+        "task": task,
+        "provider": config.provider,
+        "model": config.model,
+        "status": status,
+        "success": success,
+        "context": {
+            "query_terms": decision.query_terms,
+            "target_files": decision.target_files,
+            "selected_files": decision.selected_files,
+            "included_files": decision.included_files,
+            "skipped_files": decision.skipped_files,
+            "truncated_files": decision.truncated_files,
+            "focused_files": decision.focused_files,
+            "context_budget_tokens": decision.context_budget_tokens,
+            "context_content_tokens": decision.context_content_tokens,
+            "index_used": decision.index_used,
+            "memory_used": decision.memory_used,
+            "sqlite_memory_used": decision.sqlite_memory_used,
+            "reasons": decision.reasons,
+        },
+        "model_calls": model_calls or [],
+        "changed_files": changed_files or [],
+        "validation": _validation_summary(validation),
+    }
+    if error is not None:
+        trace["error"] = error
+    return trace
+
+
 def _print_code_trace(message: str, trace_level: TraceLevel) -> None:
     if _trace_enabled(trace_level):
         typer.echo(f"Code trace: {message}")
@@ -397,6 +448,56 @@ def _call_model(system_prompt: str, user_prompt: str, config):
     return client.complete(system_prompt, user_prompt)
 
 
+@app.command("classify")
+def classify_command(
+    task: str = typer.Argument(..., help="Request text to classify."),
+    json_output: bool = typer.Option(
+        False,
+        "--json",
+        help="Print machine-readable JSON.",
+    ),
+) -> None:
+    """Classify a request by action type, command route, and write risk."""
+    classification = classify_task(task)
+    data = classification.to_dict()
+
+    if json_output:
+        typer.echo(json.dumps(data, indent=2, sort_keys=True))
+        return
+
+    typer.echo(f"Action type: {classification.action_type}")
+    typer.echo(f"Recommended mode: {classification.recommended_mode}")
+    typer.echo(f"Subcategory: {classification.subcategory}")
+    typer.echo(f"Write intent: {classification.write_intent}")
+    typer.echo(f"Specificity: {classification.specificity}")
+    typer.echo(f"Requires clarification: {classification.requires_clarification}")
+    if classification.missing_information:
+        typer.echo("Missing information:")
+        for item in classification.missing_information:
+            typer.echo(f"- {item}")
+    typer.echo(f"Confidence: {classification.confidence}")
+    typer.echo(f"Reason: {classification.reason}")
+
+
+def _code_request_needs_clarification(classification) -> bool:
+    if classification.recommended_mode != "code":
+        return False
+    if not classification.requires_clarification:
+        return False
+    return classification.subcategory == "possible_write" or (
+        "exact documentation text or topic" in classification.missing_information
+    )
+
+
+def _print_clarification_needed(classification) -> None:
+    typer.echo("Clarification needed:")
+    for item in classification.missing_information:
+        typer.echo(f"- {item}")
+    typer.echo(f"Recommended mode: {classification.recommended_mode}")
+    typer.echo(f"Subcategory: {classification.subcategory}")
+    typer.echo("No model call made.")
+
+
 @app.command()
 def ask(
     task: str = typer.Argument(..., help="Question to answer about the repository."),
@@ -426,6 +527,11 @@ def ask(
         "--trace-level",
         help="Trace verbosity: none, basic, or debug.",
     ),
+    trace_json: bool = typer.Option(
+        False,
+        "--trace-json",
+        help="Print a machine-readable run trace after the answer.",
+    ),
 ) -> None:
     """Answer a repo-aware question without editing files."""
     config = _load_config_or_exit(env_file)
@@ -440,15 +546,37 @@ def ask(
     if _trace_enabled(resolved_trace_level):
         _print_trace("ask", repository_context, config, resolved_trace_level)
     response = _complete_with_config(ASK_SYSTEM_PROMPT, user_prompt, config)
+    model_calls = [
+        _model_call_summary(
+            purpose="initial",
+            response=response,
+            config=config,
+            system_prompt=ASK_SYSTEM_PROMPT,
+            user_prompt=user_prompt,
+        )
+    ]
     _print_model_response(response, config, ASK_SYSTEM_PROMPT, user_prompt)
+    usage = model_calls[0]["usage"]
     _record_memory(
         mode="ask",
         task=task,
         selected_files=repository_context.decision.selected_files,
         status="ask_completed",
         success=True,
-        usage=_usage_summary(response, config, ASK_SYSTEM_PROMPT, user_prompt),
+        usage=usage,
     )
+    if trace_json:
+        _print_trace_json(
+            _run_trace_json(
+                mode="ask",
+                task=task,
+                config=config,
+                repository_context=repository_context,
+                status="ask_completed",
+                success=True,
+                model_calls=model_calls,
+            )
+        )
 
 
 @app.command()
@@ -480,6 +608,11 @@ def plan(
         "--trace-level",
         help="Trace verbosity: none, basic, or debug.",
     ),
+    trace_json: bool = typer.Option(
+        False,
+        "--trace-json",
+        help="Print a machine-readable run trace after the plan.",
+    ),
 ) -> None:
     """Inspect and produce an implementation plan."""
     config = _load_config_or_exit(env_file)
@@ -494,15 +627,37 @@ def plan(
     if _trace_enabled(resolved_trace_level):
         _print_trace("plan", repository_context, config, resolved_trace_level)
     response = _complete_with_config(PLAN_SYSTEM_PROMPT, user_prompt, config)
+    model_calls = [
+        _model_call_summary(
+            purpose="initial",
+            response=response,
+            config=config,
+            system_prompt=PLAN_SYSTEM_PROMPT,
+            user_prompt=user_prompt,
+        )
+    ]
     _print_model_response(response, config, PLAN_SYSTEM_PROMPT, user_prompt)
+    usage = model_calls[0]["usage"]
     _record_memory(
         mode="plan",
         task=task,
         selected_files=repository_context.decision.selected_files,
         status="plan_completed",
         success=True,
-        usage=_usage_summary(response, config, PLAN_SYSTEM_PROMPT, user_prompt),
+        usage=usage,
     )
+    if trace_json:
+        _print_trace_json(
+            _run_trace_json(
+                mode="plan",
+                task=task,
+                config=config,
+                repository_context=repository_context,
+                status="plan_completed",
+                success=True,
+                model_calls=model_calls,
+            )
+        )
 
 
 @app.command("index")
@@ -923,8 +1078,23 @@ def code(
     ),
 ) -> None:
     """Apply a focused code change and validate it."""
-    config = _load_config_or_exit(env_file)
     resolved_trace_level = _resolve_trace_level(trace, trace_level)
+    classification = classify_task(task)
+    if _code_request_needs_clarification(classification):
+        _print_code_trace(
+            "Clarification needed before context selection.", resolved_trace_level
+        )
+        _print_clarification_needed(classification)
+        _record_memory(
+            mode="code",
+            task=task,
+            selected_files=[],
+            status="clarification_needed",
+            success=False,
+        )
+        raise typer.Exit(code=2)
+
+    config = _load_config_or_exit(env_file)
     user_prompt, repository_context = _build_user_prompt_with_context(
         "Change request",
         task,

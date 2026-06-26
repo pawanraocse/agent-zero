@@ -156,7 +156,12 @@ def _apply_hunks(original_lines: list[str], file_patch: FilePatch) -> list[str]:
     original_index = 0
 
     for hunk in file_patch.hunks:
-        hunk_start_index = max(hunk.old_start - 1, 0)
+        hunk_start_index = _locate_hunk_start(
+            original_lines,
+            hunk,
+            file_patch.path,
+            minimum_index=original_index,
+        )
         if hunk_start_index < original_index:
             raise PatchApplyError(f"Overlapping hunks for {file_patch.path}")
 
@@ -188,6 +193,61 @@ def _apply_hunks(original_lines: list[str], file_patch: FilePatch) -> list[str]:
 
     patched_lines.extend(original_lines[original_index:])
     return patched_lines
+
+
+def _locate_hunk_start(
+    original_lines: list[str],
+    hunk: Hunk,
+    relative_path: str,
+    minimum_index: int,
+) -> int:
+    header_index = max(hunk.old_start - 1, 0)
+    expected_lines = _hunk_original_lines(hunk)
+    if not expected_lines:
+        return header_index
+
+    if _lines_match_at(original_lines, header_index, expected_lines):
+        return header_index
+
+    relocated_index = _find_lines(original_lines, expected_lines, start=minimum_index)
+    if relocated_index is not None:
+        return relocated_index
+
+    if header_index >= len(original_lines):
+        raise PatchApplyError(f"Patch hunk extends past end of file: {relative_path}")
+    raise PatchApplyError(
+        f"Patch context mismatch in {relative_path}: expected "
+        f"{expected_lines[0]!r}, found {original_lines[header_index]!r}"
+    )
+
+
+def _hunk_original_lines(hunk: Hunk) -> list[str]:
+    return [line.text for line in hunk.lines if line.kind in {" ", "-"}]
+
+
+def _lines_match_at(
+    original_lines: list[str],
+    index: int,
+    expected_lines: list[str],
+) -> bool:
+    if index < 0:
+        return False
+    end_index = index + len(expected_lines)
+    if end_index > len(original_lines):
+        return False
+    return original_lines[index:end_index] == expected_lines
+
+
+def _find_lines(
+    original_lines: list[str],
+    expected_lines: list[str],
+    start: int,
+) -> int | None:
+    max_index = len(original_lines) - len(expected_lines)
+    for index in range(max(start, 0), max_index + 1):
+        if _lines_match_at(original_lines, index, expected_lines):
+            return index
+    return None
 
 
 def _assert_original_line(
