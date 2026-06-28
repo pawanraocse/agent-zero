@@ -12,6 +12,7 @@ from agent_zero.memory import (
     memory_file_scores,
     memory_item_scores,
     reset_memory,
+    update_memory_item_status,
     write_memory_candidate,
 )
 
@@ -214,7 +215,7 @@ def test_build_reflection_for_failed_run_is_low_confidence():
     assert reflection["useful_files"] == []
 
 
-def test_classify_memory_candidate_confirms_validated_code_runs():
+def test_classify_memory_candidate_keeps_validated_code_runs_as_candidates():
     candidate = classify_memory_candidate(
         {
             "mode": "code",
@@ -228,7 +229,7 @@ def test_classify_memory_candidate_confirms_validated_code_runs():
 
     assert candidate is not None
     assert candidate["type"] == "project_lesson"
-    assert candidate["status"] == "confirmed"
+    assert candidate["status"] == "candidate"
     assert candidate["confidence"] == "high"
     assert candidate["useful_files"] == ["agent_zero/model_client.py"]
     assert "validation_passed" in candidate["evidence"]
@@ -273,14 +274,14 @@ def test_write_memory_candidate_stores_sqlite_item(tmp_path):
     assert db_path == tmp_path / ".agent-zero" / "memory.db"
     assert len(items) == 1
     assert items[0]["type"] == "project_lesson"
-    assert items[0]["status"] == "confirmed"
+    assert items[0]["status"] == "candidate"
     assert items[0]["confidence"] == "high"
     assert items[0]["task_terms"] == ["bedrock", "gateway"]
     assert items[0]["useful_files"] == ["agent_zero/model_client.py"]
     assert items[0]["use_count"] == 2
 
 
-def test_delete_memory_items_removes_rejected_but_keeps_confirmed(tmp_path):
+def test_delete_memory_items_removes_rejected_but_keeps_candidates(tmp_path):
     write_memory_candidate(
         tmp_path,
         {
@@ -307,7 +308,7 @@ def test_delete_memory_items_removes_rejected_but_keeps_confirmed(tmp_path):
 
     assert deleted_count == 1
     assert len(items) == 1
-    assert items[0]["status"] == "confirmed"
+    assert items[0]["status"] == "candidate"
 
 
 def test_reset_memory_deletes_sqlite_and_can_keep_raw_log(tmp_path):
@@ -388,12 +389,47 @@ def test_apply_memory_feedback_can_reject_confirmed_item(tmp_path):
             "validation_passed": True,
         },
     )
+    update_memory_item_status(
+        tmp_path,
+        selector="latest",
+        next_status="confirmed",
+        next_confidence="high",
+        event_type="test_approved",
+        source="test",
+    )
 
     item = apply_memory_feedback(tmp_path, "failed", status="confirmed")
 
     assert item is not None
     assert item["status"] == "rejected"
     assert item["confidence"] == "low"
+
+
+def test_update_memory_item_status_can_approve_by_prefix(tmp_path):
+    write_memory_candidate(
+        tmp_path,
+        {
+            "mode": "code",
+            "task_terms": ["bedrock"],
+            "changed_files": ["agent_zero/model_client.py"],
+            "status": "validation_passed",
+            "success": True,
+            "validation_passed": True,
+        },
+    )
+    item_id = load_memory_items(tmp_path)[0]["id"]
+
+    item = update_memory_item_status(
+        tmp_path,
+        selector=item_id[:8],
+        next_status="confirmed",
+        next_confidence="high",
+        event_type="user_approved",
+    )
+
+    assert item is not None
+    assert item["status"] == "confirmed"
+    assert item["confidence"] == "high"
 
 
 def test_detect_user_feedback_recognizes_clear_phrases():

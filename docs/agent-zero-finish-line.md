@@ -26,9 +26,9 @@ If a feature does not help answer that, leave it for Agent Hub.
 | 5 | `--trace-json` for `code` | Done | Exposes patch, retry, validation, changed files, and main failure state. |
 | 6 | Structured tool call records | Partial | Ask, plan, and code traces include major timed tool calls; deeper retrieval substeps are pending. |
 | 7 | Eval suite command | Done | Lets us run regression checks before changing retrieval, memory, or prompts. |
-| 8 | Cost budget guardrail | Pending | Prevents runaway token usage in larger workflows. |
-| 9 | Better relevance filtering | Pending | Reduces hallucination and context waste. |
-| 10 | Memory approval polish | Pending | Keeps self-learning explicit and reversible. |
+| 8 | Cost budget guardrail | Done | Stops ask, plan, and code runs before model calls when prompt cost exceeds `--max-cost`. |
+| 9 | Better relevance filtering | Done | Content-search hits now need meaningful query-term matches, reducing weak context. |
+| 10 | Memory approval polish | Done | Validated lessons stay candidates until review, approval, or feedback confirms them. |
 
 ## Prototype Only
 
@@ -58,10 +58,8 @@ These belong in Agent Hub.
 
 ## Recommended Order
 
-1. Add cost budget guardrail.
-2. Improve relevance filtering.
-3. Polish memory approval and review.
-4. Stop Agent Zero and start Agent Hub.
+1. Run the testing plan end to end.
+2. Stop Agent Zero and start Agent Hub.
 
 ## Exit Criteria
 
@@ -71,6 +69,7 @@ Agent Zero is ready to pause when:
 - A code run is traceable.
 - Tool calls are visible as structured records.
 - A small eval suite can measure regressions.
-- Cost limits can stop or warn before expensive runs.
+- Cost limits can stop expensive runs before model calls.
 - Memory does not promote failed or unclear runs automatically.
+- Validated memory requires approval or feedback before it boosts retrieval.
 - Context selection is explainable and avoids obvious noise.

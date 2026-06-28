@@ -385,6 +385,20 @@ Estimated cost: $0.016845
 
 This makes the context and cost tradeoff visible while you experiment.
 
+To stop a run before it spends more than a small budget, use `--max-cost`:
+
+```bash
+python -m agent_zero ask "Explain Bedrock gateway" --max-cost 0.005
+python -m agent_zero plan "Add a new provider" --max-cost 0.005
+python -m agent_zero code "Add one sentence to README.md saying Agent Zero teaches agent internals" --dry-run --max-cost 0.005
+```
+
+The guardrail estimates prompt input cost after repository context is built and
+before the model is called. If the projected cost is already above the limit,
+Agent Zero stops and prints `No model call made.` This requires
+`AGENT_ZERO_INPUT_COST_PER_1M_TOKENS`; if pricing is not configured, Agent Zero
+refuses to enforce the budget instead of silently ignoring it.
+
 ## Run The Agent
 
 ### Index Mode
@@ -502,6 +516,24 @@ python -m agent_zero memory --status candidate --prune --yes
 
 Confirmed memory is protected and cannot be pruned with this command.
 
+Review memory candidates before allowing them to affect retrieval:
+
+```bash
+python -m agent_zero memory --review
+python -m agent_zero memory --approve latest
+python -m agent_zero memory --reject latest
+```
+
+You can also approve or reject by id prefix:
+
+```bash
+python -m agent_zero memory --approve 4f2a91bc
+python -m agent_zero memory --reject 4f2a91bc
+```
+
+Validated code runs become high-confidence candidates, not confirmed lessons.
+Only confirmed memory boosts future context selection.
+
 Apply explicit user feedback to the latest matching memory item:
 
 ```bash
@@ -582,9 +614,11 @@ What happens internally:
 8. It prints the answer.
 9. It prints token and cost information when available.
 
-Direct evidence wins during ranking. A file that matches the question through
-content search, path terms, index concepts, symbols, summaries, or learning
-memory is treated as primary context. A file discovered only through graph
+Direct evidence wins during ranking. A file that matches meaningful query terms
+through content search, path terms, index concepts, symbols, summaries, or
+approved learning memory is treated as primary context. Generic search hits are
+filtered so broad words do not pull unrelated files into context. A file
+discovered only through graph
 relationships, such as `imports` or `mentions`, is treated as supporting context
 and is included only when there is room.
 
@@ -671,7 +705,8 @@ python -m agent_zero code "Add one sentence to README.md saying Agent Zero expos
 
 This prints a JSON trace with mode, task, provider, model, selected files,
 included/skipped/truncated files, context budget, retrieval reasons, model call
-usage, patch summary, changed files, validation, status, and success.
+usage, patch summary, changed files, validation, cost budget, status, and
+success.
 
 The trace also includes a `tool_calls` array. For ask and plan, it records
 config loading, context building, model completion, and memory recording. For
@@ -1608,7 +1643,8 @@ Built:
 - Ask runs without reusable file evidence become low-confidence interaction
   observations.
 - Successful runs with useful or changed files become project lessons.
-- Validated code runs become confirmed, high-confidence memory items.
+- Validated code runs become high-confidence candidates that need approval or
+  user feedback before they influence retrieval.
 - Failed runs become rejected failure lessons, so they are not treated as useful
   retrieval boosts.
 
@@ -1616,7 +1652,7 @@ Learning outcome:
 
 - Self-learning is not the same as saving every answer. A useful agent should
   first classify what happened, preserve evidence, and only promote stronger
-  signals when validation or repeated use supports them.
+  signals when explicit approval or user feedback supports them.
 - This is why Agent Zero keeps raw memory and curated memory separate:
   `memory.jsonl` explains the run history, while `memory.db` decides what can
   influence future retrieval.

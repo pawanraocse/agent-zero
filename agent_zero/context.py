@@ -216,6 +216,7 @@ def decide_context_files(
 ) -> ContextDecision:
     terms = _query_terms(task)
     search_paths = _paths_from_search_results(search_results)
+    search_matches = _search_matches_by_path(search_results, terms)
     index_entries = index_entries_by_path(repo_index)
     memory_scores = memory_file_scores(memory_records or [], terms)
     sqlite_memory_scores = memory_item_scores(memory_items or [], terms)
@@ -230,6 +231,7 @@ def decide_context_files(
             path,
             terms,
             search_paths,
+            search_matches.get(path, []),
             index_entries.get(path),
         )
         if score > 0:
@@ -281,6 +283,7 @@ def _score_file(
     path: str,
     terms: list[str],
     search_paths: list[str],
+    search_matches: list[str],
     index_entry: dict | None = None,
 ) -> tuple[int, list[str]]:
     score = 0
@@ -303,9 +306,13 @@ def _score_file(
         score += 2 * len(fuzzy_term_matches)
         reasons.append(f"path fuzzy matches: {', '.join(fuzzy_term_matches)}")
 
-    if path in search_paths:
-        score += 8
+    meaningful_search_matches = _meaningful_search_matches(terms, search_matches)
+    if path in search_paths and meaningful_search_matches:
+        score += 4 * len(meaningful_search_matches)
         reasons.append("content search hit")
+        reasons.append(
+            f"content search matches: {', '.join(meaningful_search_matches)}"
+        )
 
     index_score, index_reasons = _score_index_entry(index_entry, terms)
     if index_score:
@@ -615,6 +622,67 @@ def _paths_from_search_results(results: list[str]) -> list[str]:
     return paths
 
 
+def _search_matches_by_path(
+    results: list[str],
+    terms: list[str],
+) -> dict[str, list[str]]:
+    matches_by_path: dict[str, list[str]] = {}
+    for result in results:
+        parts = result.split(":", 2)
+        if not parts:
+            continue
+        path = parts[0]
+        line_text = parts[2] if len(parts) == 3 else result
+        normalized_line = _normalize(line_text)
+        line_terms = set(normalized_line.split())
+        compact_line = normalized_line.replace(" ", "")
+        matched_terms = [
+            term
+            for term in terms
+            if term in line_terms or (len(term) >= 4 and term in compact_line)
+        ]
+        if not matched_terms:
+            continue
+        existing = matches_by_path.setdefault(path, [])
+        for term in matched_terms:
+            if term not in existing:
+                existing.append(term)
+    return matches_by_path
+
+
+def _meaningful_search_matches(
+    terms: list[str],
+    search_matches: list[str],
+) -> list[str]:
+    if not search_matches:
+        return []
+
+    domain_terms = _domain_query_terms(terms)
+    if not domain_terms:
+        return search_matches
+    return [term for term in search_matches if term in domain_terms]
+
+
+def _domain_query_terms(terms: list[str]) -> set[str]:
+    return set(terms) - {
+        "add",
+        "append",
+        "change",
+        "describe",
+        "edit",
+        "explain",
+        "give",
+        "note",
+        "plan",
+        "proceed",
+        "remove",
+        "show",
+        "tell",
+        "update",
+        "write",
+    }
+
+
 def _looks_like_overview_question(task: str, terms: list[str]) -> bool:
     lowered = task.lower()
     if any(phrase in lowered for phrase in ("what does", "what is", "overview")):
@@ -711,6 +779,8 @@ def _human_relevance_reason(reasons: list[str]) -> str:
 def _humanize_relevance_reason(reason: str) -> str:
     if reason == "content search hit":
         return "matched repository search results"
+    if reason.startswith("content search matches:"):
+        return "search lines matched query terms: " + reason.split(":", 1)[1].strip()
     if reason == "overview prior":
         return "likely project overview file"
     if reason == "explicit target file":

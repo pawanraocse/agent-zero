@@ -166,7 +166,6 @@ def classify_memory_candidate(record: dict[str, Any]) -> dict[str, Any] | None:
 
     if useful_files:
         confidence = "high" if record.get("validation_passed") is True else "medium"
-        status_value = "confirmed" if confidence == "high" else "candidate"
         return {
             "type": "project_lesson",
             "scope": "repo",
@@ -174,7 +173,7 @@ def classify_memory_candidate(record: dict[str, Any]) -> dict[str, Any] | None:
                 f"{mode} task with terms {_terms_label(task_terms_value)} "
                 f"used {', '.join(useful_files)}."
             ),
-            "status": status_value,
+            "status": "candidate",
             "confidence": confidence,
             "task_terms": task_terms_value,
             "useful_files": useful_files,
@@ -330,6 +329,70 @@ def apply_memory_feedback(
     return items[0] if items else None
 
 
+def update_memory_item_status(
+    root: Path,
+    selector: str,
+    next_status: str,
+    next_confidence: str,
+    event_type: str,
+    source: str = "user",
+    status_filter: str | None = None,
+) -> dict[str, Any] | None:
+    if next_status not in {"candidate", "confirmed", "rejected"}:
+        raise ValueError("next_status must be one of: candidate, confirmed, rejected")
+    if next_confidence not in {"low", "medium", "high"}:
+        raise ValueError("next_confidence must be one of: low, medium, high")
+
+    path = root / MEMORY_DB_RELATIVE_PATH
+    if not path.exists():
+        return None
+
+    item = _select_memory_item(root, selector, status_filter=status_filter)
+    if item is None:
+        return None
+
+    now = datetime.now(UTC).isoformat()
+    with sqlite3.connect(path) as connection:
+        _ensure_memory_schema(connection)
+        connection.execute(
+            """
+            update memory_items
+            set status = ?, confidence = ?, updated_at = ?, last_used_at = ?
+            where id = ?
+            """,
+            (next_status, next_confidence, now, now, item["id"]),
+        )
+        connection.execute(
+            """
+            insert into memory_events (
+                memory_id, event_type, source, details_json, created_at
+            )
+            values (?, ?, ?, ?, ?)
+            """,
+            (
+                item["id"],
+                event_type,
+                source,
+                json.dumps(
+                    {
+                        "selector": selector,
+                        "status": next_status,
+                        "confidence": next_confidence,
+                    },
+                    sort_keys=True,
+                ),
+                now,
+            ),
+        )
+
+    updated_items = [
+        memory_item
+        for memory_item in load_memory_items(root)
+        if memory_item["id"] == item["id"]
+    ]
+    return updated_items[0] if updated_items else None
+
+
 def detect_user_feedback(text: str) -> str | None:
     normalized = " ".join(_normalize(text).split())
     if not normalized:
@@ -371,6 +434,30 @@ def detect_user_feedback(text: str) -> str | None:
         return "worked"
     if normalized in failed_phrases:
         return "failed"
+    return None
+
+
+def _select_memory_item(
+    root: Path,
+    selector: str,
+    status_filter: str | None = None,
+) -> dict[str, Any] | None:
+    items = load_memory_items(root)
+    if status_filter is not None:
+        items = [item for item in items if item["status"] == status_filter]
+    if not items:
+        return None
+
+    if selector == "latest":
+        return items[-1]
+
+    exact_matches = [item for item in items if item["id"] == selector]
+    if exact_matches:
+        return exact_matches[0]
+
+    prefix_matches = [item for item in items if item["id"].startswith(selector)]
+    if len(prefix_matches) == 1:
+        return prefix_matches[0]
     return None
 
 

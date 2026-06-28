@@ -9,6 +9,7 @@ from agent_zero.memory import (
     append_memory_record,
     load_memory,
     load_memory_items,
+    update_memory_item_status,
     write_memory_candidate,
 )
 from agent_zero.tools.command_tool import CommandResult
@@ -485,6 +486,93 @@ def test_ask_command_estimates_usage_when_provider_usage_is_missing(
     assert "Estimated cost: $" in result.output
 
 
+def test_ask_command_stops_before_model_when_max_cost_is_exceeded(
+    tmp_path, monkeypatch
+):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "AGENT_ZERO_BASE_URL=http://localhost:1234/v1",
+                "AGENT_ZERO_API_KEY=test-key",
+                "AGENT_ZERO_MODEL=test-model",
+                "AGENT_ZERO_INPUT_COST_PER_1M_TOKENS=1000000",
+                "AGENT_ZERO_OUTPUT_COST_PER_1M_TOKENS=2.0",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "README.md").write_text("# Agent Zero\n", encoding="utf-8")
+    fake_client = FakeModelClient(ModelResponse(content="should not be called"))
+    monkeypatch.setattr(cli, "create_model_client", lambda config: fake_client)
+    monkeypatch.chdir(tmp_path)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        [
+            "ask",
+            "What does this project do?",
+            "--max-cost",
+            "0.000001",
+            "--trace-json",
+            "--env-file",
+            str(env_file),
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "Cost budget exceeded before model call" in result.output
+    assert "No model call made." in result.output
+    assert fake_client.calls == []
+    trace = json.loads(result.output.split("Trace JSON:\n", maxsplit=1)[1])
+    assert trace["status"] == "cost_budget_exceeded"
+    assert trace["success"] is False
+    assert trace["model_calls"] == []
+    assert trace["cost_budget"]["exceeded"] is True
+    assert trace["tool_calls"][2]["name"] == "check_cost_budget"
+    assert trace["tool_calls"][2]["status"] == "failed"
+
+
+def test_ask_command_refuses_max_cost_without_input_pricing(tmp_path, monkeypatch):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "AGENT_ZERO_BASE_URL=http://localhost:1234/v1",
+                "AGENT_ZERO_API_KEY=test-key",
+                "AGENT_ZERO_MODEL=test-model",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "README.md").write_text("# Agent Zero\n", encoding="utf-8")
+    fake_client = FakeModelClient(ModelResponse(content="should not be called"))
+    monkeypatch.setattr(cli, "create_model_client", lambda config: fake_client)
+    monkeypatch.chdir(tmp_path)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        [
+            "ask",
+            "What does this project do?",
+            "--max-cost",
+            "1.0",
+            "--trace-json",
+            "--env-file",
+            str(env_file),
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "Cannot enforce cost budget" in result.output
+    assert fake_client.calls == []
+    trace = json.loads(result.output.split("Trace JSON:\n", maxsplit=1)[1])
+    assert trace["status"] == "cost_budget_unavailable"
+    assert trace["cost_budget"]["enforced"] is False
+
+
 def test_ask_command_records_learning_memory(tmp_path, monkeypatch):
     monkeypatch.delenv("AGENT_ZERO_DISABLE_MEMORY", raising=False)
     env_file = tmp_path / ".env"
@@ -610,6 +698,45 @@ def test_plan_command_calls_model_and_prints_structured_plan(tmp_path, monkeypat
     assert "Change request:\nAdd config loading" in user_prompt
     assert "Repository context:" in user_prompt
     assert "Relevance guide:" in user_prompt
+
+
+def test_plan_command_stops_before_model_when_max_cost_is_exceeded(
+    tmp_path, monkeypatch
+):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "AGENT_ZERO_BASE_URL=http://localhost:1234/v1",
+                "AGENT_ZERO_API_KEY=test-key",
+                "AGENT_ZERO_MODEL=test-model",
+                "AGENT_ZERO_INPUT_COST_PER_1M_TOKENS=1000000",
+                "AGENT_ZERO_OUTPUT_COST_PER_1M_TOKENS=2.0",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "README.md").write_text("# Agent Zero\n", encoding="utf-8")
+    fake_client = FakeModelClient(ModelResponse(content="should not be called"))
+    monkeypatch.setattr(cli, "create_model_client", lambda config: fake_client)
+    monkeypatch.chdir(tmp_path)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        [
+            "plan",
+            "Add config loading",
+            "--max-cost",
+            "0.000001",
+            "--env-file",
+            str(env_file),
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "Cost budget exceeded before model call" in result.output
+    assert fake_client.calls == []
 
 
 def test_plan_command_show_context_prints_selection_reasons(tmp_path, monkeypatch):
@@ -839,6 +966,14 @@ def test_memory_command_groups_raw_and_curated_memory(tmp_path, monkeypatch):
             "validation_passed": True,
         },
     )
+    update_memory_item_status(
+        tmp_path,
+        selector="latest",
+        next_status="confirmed",
+        next_confidence="high",
+        event_type="test_approved",
+        source="test",
+    )
     write_memory_candidate(
         tmp_path,
         {
@@ -892,6 +1027,14 @@ def test_memory_command_filters_by_status(tmp_path, monkeypatch):
             "validation_passed": True,
         },
     )
+    update_memory_item_status(
+        tmp_path,
+        selector="latest",
+        next_status="confirmed",
+        next_confidence="high",
+        event_type="test_approved",
+        source="test",
+    )
     write_memory_candidate(
         tmp_path,
         {
@@ -926,6 +1069,14 @@ def test_memory_command_prints_json(tmp_path, monkeypatch):
             "success": True,
             "validation_passed": True,
         },
+    )
+    update_memory_item_status(
+        tmp_path,
+        selector="latest",
+        next_status="confirmed",
+        next_confidence="high",
+        event_type="test_approved",
+        source="test",
     )
     monkeypatch.chdir(tmp_path)
 
@@ -975,6 +1126,14 @@ def test_memory_command_prune_rejected_with_yes_deletes_only_rejected(
             "validation_passed": True,
         },
     )
+    update_memory_item_status(
+        tmp_path,
+        selector="latest",
+        next_status="confirmed",
+        next_confidence="high",
+        event_type="test_approved",
+        source="test",
+    )
     write_memory_candidate(
         tmp_path,
         {
@@ -1009,6 +1168,14 @@ def test_memory_command_refuses_to_prune_confirmed(tmp_path, monkeypatch):
             "validation_passed": True,
         },
     )
+    update_memory_item_status(
+        tmp_path,
+        selector="latest",
+        next_status="confirmed",
+        next_confidence="high",
+        event_type="test_approved",
+        source="test",
+    )
     monkeypatch.chdir(tmp_path)
 
     runner = CliRunner()
@@ -1040,6 +1207,14 @@ def test_memory_command_reset_dry_run_does_not_delete(tmp_path, monkeypatch):
             "success": True,
             "validation_passed": True,
         },
+    )
+    update_memory_item_status(
+        tmp_path,
+        selector="latest",
+        next_status="confirmed",
+        next_confidence="high",
+        event_type="test_approved",
+        source="test",
     )
     monkeypatch.chdir(tmp_path)
 
@@ -1074,6 +1249,14 @@ def test_memory_command_reset_with_yes_deletes_sqlite_only(tmp_path, monkeypatch
             "success": True,
             "validation_passed": True,
         },
+    )
+    update_memory_item_status(
+        tmp_path,
+        selector="latest",
+        next_status="confirmed",
+        next_confidence="high",
+        event_type="test_approved",
+        source="test",
     )
     monkeypatch.chdir(tmp_path)
 
@@ -1169,6 +1352,14 @@ def test_memory_command_feedback_failed_with_status_filter(tmp_path, monkeypatch
             "validation_passed": True,
         },
     )
+    update_memory_item_status(
+        tmp_path,
+        selector="latest",
+        next_status="confirmed",
+        next_confidence="high",
+        event_type="test_approved",
+        source="test",
+    )
     monkeypatch.chdir(tmp_path)
 
     runner = CliRunner()
@@ -1206,6 +1397,83 @@ def test_memory_command_feedback_prints_json(tmp_path, monkeypatch):
     assert data["feedback"] == "worked"
     assert data["updated"] is True
     assert data["item"]["status"] == "confirmed"
+
+
+def test_memory_command_review_shows_candidate_ids_and_evidence(tmp_path, monkeypatch):
+    write_memory_candidate(
+        tmp_path,
+        {
+            "mode": "code",
+            "task_terms": ["bedrock"],
+            "changed_files": ["agent_zero/model_client.py"],
+            "status": "validation_passed",
+            "success": True,
+            "validation_passed": True,
+        },
+    )
+    item = load_memory_items(tmp_path)[0]
+    monkeypatch.chdir(tmp_path)
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["memory", "--review"])
+
+    assert result.exit_code == 0
+    assert "Candidate memory items: 1" in result.output
+    assert item["id"] in result.output
+    assert (
+        "evidence: status:validation_passed, validation_passed, changed_files"
+        in result.output
+    )
+    assert f"python -m agent_zero memory --approve {item['id'][:8]}" in result.output
+
+
+def test_memory_command_approve_promotes_candidate_by_prefix(tmp_path, monkeypatch):
+    write_memory_candidate(
+        tmp_path,
+        {
+            "mode": "code",
+            "task_terms": ["bedrock"],
+            "changed_files": ["agent_zero/model_client.py"],
+            "status": "validation_passed",
+            "success": True,
+            "validation_passed": True,
+        },
+    )
+    item_id = load_memory_items(tmp_path)[0]["id"]
+    monkeypatch.chdir(tmp_path)
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["memory", "--approve", item_id[:8]])
+
+    assert result.exit_code == 0
+    assert f"Memory approved: {item_id}" in result.output
+    item = load_memory_items(tmp_path)[0]
+    assert item["status"] == "confirmed"
+    assert item["confidence"] == "high"
+
+
+def test_memory_command_reject_marks_candidate_rejected(tmp_path, monkeypatch):
+    write_memory_candidate(
+        tmp_path,
+        {
+            "mode": "code",
+            "task_terms": ["bedrock"],
+            "changed_files": ["agent_zero/model_client.py"],
+            "status": "validation_passed",
+            "success": True,
+            "validation_passed": True,
+        },
+    )
+    monkeypatch.chdir(tmp_path)
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["memory", "--reject", "latest"])
+
+    assert result.exit_code == 0
+    assert "Memory rejected:" in result.output
+    item = load_memory_items(tmp_path)[0]
+    assert item["status"] == "rejected"
+    assert item["confidence"] == "low"
 
 
 def test_memory_command_rejects_feedback_with_prune(tmp_path, monkeypatch):
@@ -1989,6 +2257,54 @@ diff --git a/hello.txt b/hello.txt
     system_prompt, user_prompt = fake_client.calls[0]
     assert system_prompt == cli.CODE_SYSTEM_PROMPT
     assert "Change request:\nChange hello.txt old to new" in user_prompt
+
+
+def test_code_command_stops_before_model_when_max_cost_is_exceeded(
+    tmp_path, monkeypatch
+):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "AGENT_ZERO_BASE_URL=http://localhost:1234/v1",
+                "AGENT_ZERO_API_KEY=test-key",
+                "AGENT_ZERO_MODEL=test-model",
+                "AGENT_ZERO_INPUT_COST_PER_1M_TOKENS=1000000",
+                "AGENT_ZERO_OUTPUT_COST_PER_1M_TOKENS=2.0",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    target = tmp_path / "hello.txt"
+    target.write_text("old\n", encoding="utf-8")
+    fake_client = FakeModelClient(ModelResponse(content="should not be called"))
+    monkeypatch.setattr(cli, "create_model_client", lambda config: fake_client)
+    monkeypatch.chdir(tmp_path)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        [
+            "code",
+            "Change hello.txt old to new",
+            "--max-cost",
+            "0.000001",
+            "--dry-run",
+            "--trace-json",
+            "--env-file",
+            str(env_file),
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "Cost budget exceeded before model call" in result.output
+    assert fake_client.calls == []
+    assert target.read_text(encoding="utf-8") == "old\n"
+    trace = json.loads(result.output.split("Trace JSON:\n", maxsplit=1)[1])
+    assert trace["status"] == "cost_budget_exceeded"
+    assert trace["model_calls"] == []
+    assert trace["classification"]["recommended_mode"] == "code"
+    assert trace["cost_budget"]["exceeded"] is True
 
 
 def test_code_command_accepts_context_budget(tmp_path, monkeypatch):

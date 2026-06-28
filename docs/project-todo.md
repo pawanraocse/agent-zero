@@ -94,7 +94,7 @@ Tasks:
 - [ ] Add memory promotion rules based on eval outcomes.
   - Confirm memory only when eval score passes.
   - Reject memory when eval score fails or forbidden terms appear.
-- [ ] Store why a memory item was created.
+- [x] Store why a memory item was created.
   - Include source signal: validation, eval score, explicit user feedback,
     detected feedback, or manual confirmation.
 - [ ] Add memory confidence decay.
@@ -103,9 +103,13 @@ Tasks:
 - [ ] Add memory conflict detection.
   - Detect when two memory items recommend different files for similar terms.
   - Show conflicts in `python -m agent_zero memory`.
-- [ ] Add memory review command.
+- [x] Add memory review command.
   - Proposed command: `python -m agent_zero memory --review`.
   - Show candidate items with evidence and suggested action.
+- [x] Add explicit approval/rejection.
+  - Commands: `python -m agent_zero memory --approve latest` and
+    `python -m agent_zero memory --reject latest`.
+  - Validated code runs stay as high-confidence candidates until approved.
 - [ ] Add memory export/import.
   - Useful for learning experiments and backups.
   - Keep raw JSONL separate from curated SQLite export.

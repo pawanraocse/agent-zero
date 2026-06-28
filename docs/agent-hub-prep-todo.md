@@ -234,20 +234,24 @@ Tests:
 
 ## Priority 6: Cost Budget Guardrail
 
-Goal: stop or warn before spending too much.
+Goal: stop before spending too much.
 
 Build:
 
-- [ ] Add `--max-estimated-cost`.
+- [x] Add `--max-cost` to `ask`, `plan`, and `code`.
+- [x] Estimate prompt input cost after context building and before model calls.
+- [x] Stop above-budget runs before calling the model.
+- [x] Refuse to enforce budgets when input pricing is not configured.
+- [x] Add cost budget details to trace JSON.
 - [ ] Add `--max-context-tokens`.
 - [ ] Add config defaults in `.env`.
-- [ ] Warn when context selection exceeds budget.
+- [ ] Warn when context selection exceeds a separate context budget.
 - [ ] For risky over-budget runs, require explicit `--yes`.
 
 Example:
 
 ```bash
-python -m agent_zero ask "Explain the whole project" --max-estimated-cost 0.01
+python -m agent_zero ask "Explain the whole project" --max-cost 0.01
 ```
 
 Why Agent Hub needs it:
@@ -257,8 +261,11 @@ Why Agent Hub needs it:
 
 Tests:
 
+- [x] Above-budget ask run stops with clear message.
+- [x] Above-budget plan run stops with clear message.
+- [x] Above-budget code run stops with clear message.
+- [x] Missing pricing stops safely instead of silently ignoring the budget.
 - [ ] Below-budget run proceeds.
-- [ ] Above-budget run stops with clear message.
 - [ ] `--yes` allows explicit over-budget run.
 
 ## Priority 7: Human Approval Gates
@@ -289,11 +296,12 @@ Goal: prevent bad self-learning.
 
 Build:
 
-- [ ] Add `python -m agent_zero memory --review`.
-- [ ] Show candidate memories with evidence, status, confidence, and suggested
+- [x] Add `python -m agent_zero memory --review`.
+- [x] Show candidate memories with evidence, status, confidence, and suggested
       action.
-- [ ] Add explicit promote/reject by memory id.
-- [ ] Keep confirmed memory protected.
+- [x] Add explicit promote/reject by memory id prefix or `latest`.
+- [x] Keep confirmed memory protected from pruning.
+- [x] Keep validated code runs as high-confidence candidates until approved.
 
 Why Agent Hub needs it:
 
@@ -302,10 +310,10 @@ Why Agent Hub needs it:
 
 Tests:
 
-- [ ] Candidate memory appears in review.
-- [ ] Promote changes status to confirmed.
-- [ ] Reject changes status to rejected.
-- [ ] Confirmed memory is protected from accidental deletion.
+- [x] Candidate memory appears in review.
+- [x] Promote changes status to confirmed.
+- [x] Reject changes status to rejected.
+- [x] Confirmed memory is protected from accidental deletion.
 
 ## Priority 9: Provider And Model Routing
 

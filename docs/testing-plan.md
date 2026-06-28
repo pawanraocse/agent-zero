@@ -270,12 +270,22 @@ Observe:
 - Candidate items.
 - Rejected items.
 
+Review candidate evidence:
+
+```bash
+python -m agent_zero memory --review
+python -m agent_zero memory --approve latest
+python -m agent_zero memory --reject latest
+```
+
 Expected learning:
 
 - Raw JSONL is the audit log.
 - SQLite memory is curated retrieval memory.
 - Candidate and rejected memory do not boost retrieval.
 - Confirmed memory can influence future file selection.
+- Validation creates evidence, but approval decides whether that evidence can
+  influence future retrieval.
 
 ## Test 11: Feedback Memory
 
@@ -450,7 +460,30 @@ Expected learning:
   finished.
 - This is the first step toward testing Agent Hub changes before trusting them.
 
-## Test 17: Failure Case - Empty Patch
+## Test 17: Cost Budget Guardrail
+
+Run:
+
+```bash
+python -m agent_zero ask "Explain Bedrock gateway" --max-cost 0.000001 --trace-json
+```
+
+Observe:
+
+- The command stops before the model call when projected prompt cost exceeds the
+  budget.
+- Output says `No model call made.`
+- Trace JSON includes `cost_budget`.
+- `model_calls` is empty on a blocked run.
+
+Expected learning:
+
+- Cost control has to happen before the model call.
+- Context can be useful and still too expensive for a given budget.
+- A future Agent Hub needs this kind of preflight guard before orchestration
+  fans out into multiple agents.
+
+## Test 18: Failure Case - Empty Patch
 
 Run a request that may already be satisfied:
 
@@ -469,7 +502,7 @@ Expected learning:
 - Coding agents need guardrails for no-op or low-quality patches.
 - Empty patches should not be treated as successful code changes.
 
-## Test 18: Failure Case - Patch Context Mismatch
+## Test 19: Failure Case - Patch Context Mismatch
 
 Run a README edit with a small context budget:
 
@@ -495,7 +528,7 @@ Expected learning:
 - Too little context can produce weak patch anchors.
 - Increasing context can improve patch reliability, at higher cost.
 
-## Test 19: Validation Commands
+## Test 20: Validation Commands
 
 Check `.env` validation settings:
 
@@ -515,7 +548,7 @@ Expected learning:
 - Dry run skips patch application and validation.
 - Real code mode runs validation after applying the patch.
 
-## Test 20: Full Local Regression
+## Test 21: Full Local Regression
 
 Run:
 
@@ -531,7 +564,7 @@ Expected learning:
 - Ruff format protects style consistency.
 - Ruff check catches lint issues.
 
-## Test 21: Read Result JSON
+## Test 22: Read Result JSON
 
 After an eval, inspect the latest result:
 
@@ -560,7 +593,7 @@ Expected learning:
 - Eval results are the best way to debug what changed between runs.
 - They are also the foundation for future dashboards and eval suites.
 
-## Test 22: End-To-End Learning Loop
+## Test 23: End-To-End Learning Loop
 
 Run this sequence:
 

@@ -316,8 +316,11 @@ Steps:
 2. Add a safe text file reader. Done.
 3. Add search. Done.
 4. Include selected context in `ask` mode. Done.
-5. Rank context using query terms, search hits, path priority, and overview priors. Done.
+5. Rank context using query terms, meaningful search-line matches, path
+   priority, and overview priors. Done.
 6. Include context selection reasons in the model prompt. Done.
+7. Filter weak content-search hits that do not match meaningful query terms.
+   Done.
 
 Learning outcome:
 
@@ -834,14 +837,15 @@ Steps:
 5. Mark successful ask runs without file evidence as low-confidence candidates.
    Done.
 6. Mark successful file-backed runs as candidate project lessons. Done.
-7. Promote validated code runs to confirmed, high-confidence lessons. Done.
+7. Keep validated code runs as high-confidence candidates until approved. Done.
 8. Mark failed runs as rejected failure lessons. Done.
 
 Learning outcome:
 
 - Understand that memory selection is an agentic step. The agent should not
   blindly remember every answer; it should classify evidence, confidence, and
-  status before using memory for future retrieval.
+  status before using memory for future retrieval. Validation is evidence;
+  approval is permission to reuse that evidence.
 
 ### Milestone 33: Confirmed Memory Retrieval
 
@@ -1175,6 +1179,11 @@ Build in this order:
 49. Clarification detection.
 50. Stale hunk relocation.
 51. Read-only trace JSON.
+52. Structured tool call trace records.
+53. Eval suite command.
+54. Cost budget guardrail.
+55. Meaningful search-term relevance filtering.
+56. Explicit memory review and approval.
 
 Each step should leave the project runnable.
 

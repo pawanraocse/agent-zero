@@ -1,5 +1,5 @@
 from agent_zero.context import build_repository_context, decide_context_files
-from agent_zero.memory import write_memory_candidate
+from agent_zero.memory import update_memory_item_status, write_memory_candidate
 
 
 def test_build_repository_context_includes_overview_files(tmp_path):
@@ -129,6 +129,14 @@ def test_build_repository_context_loads_confirmed_sqlite_memory(tmp_path):
             "validation_passed": True,
         },
     )
+    update_memory_item_status(
+        tmp_path,
+        selector="latest",
+        next_status="confirmed",
+        next_confidence="high",
+        event_type="test_approved",
+        source="test",
+    )
 
     context = build_repository_context(tmp_path, "Explain bedrock gateway")
 
@@ -161,8 +169,8 @@ def test_decide_context_files_ranks_config_files_for_bedrock_questions():
     )
 
     assert decision.selected_files[:3] == [
-        "agent_zero/model_client.py",
         "agent_zero/config.py",
+        "agent_zero/model_client.py",
         ".env.example",
     ]
     assert "content search hit" in decision.reasons["agent_zero/model_client.py"]

@@ -38,9 +38,10 @@ from agent_zero.memory import (
     load_memory_items,
     reset_memory,
     task_terms,
+    update_memory_item_status,
     write_memory_candidate,
 )
-from agent_zero.model_client import ModelClientError, create_model_client
+from agent_zero.model_client import ModelClientError, ModelResponse, create_model_client
 from agent_zero.repo_index import (
     build_repo_index,
     index_file_count,
@@ -50,7 +51,12 @@ from agent_zero.repo_index import (
 from agent_zero.task_classifier import classify_task
 from agent_zero.tools.command_tool import CommandRunError, CommandResult, run_command
 from agent_zero.tools.patch_tool import PatchApplyError, apply_unified_diff
-from agent_zero.usage import estimate_usage_cost, format_usage_cost, resolve_token_usage
+from agent_zero.usage import (
+    TokenUsage,
+    estimate_usage_cost,
+    format_usage_cost,
+    resolve_token_usage,
+)
 
 app = typer.Typer(
     help="Agent Zero: a minimal coding agent built from scratch.",
@@ -325,6 +331,163 @@ def _duration_ms(started_at: float) -> float:
     return round((time.perf_counter() - started_at) * 1000, 3)
 
 
+def _cost_budget_check(
+    system_prompt: str,
+    user_prompt: str,
+    config,
+    max_cost: float | None,
+    spent_cost: float = 0.0,
+) -> dict | None:
+    if max_cost is None:
+        return None
+
+    usage = resolve_token_usage(
+        response=ModelResponse(content=""),
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        model=config.model,
+    )
+    input_usage = TokenUsage(
+        input_tokens=usage.input_tokens,
+        output_tokens=0,
+        total_tokens=usage.input_tokens,
+        estimated=True,
+    )
+    input_cost = None
+    if config.input_cost_per_1m_tokens is not None:
+        input_cost = estimate_usage_cost(
+            input_usage,
+            config.model_copy(update={"output_cost_per_1m_tokens": 0.0}),
+        )
+
+    projected_cost = None if input_cost is None else spent_cost + input_cost.total_cost
+    return {
+        "max_cost": _format_cost_value(max_cost),
+        "spent_cost": _format_cost_value(spent_cost),
+        "estimated_input_tokens": usage.input_tokens,
+        "estimated_input_cost": (
+            format_usage_cost(input_cost) if input_cost is not None else None
+        ),
+        "projected_cost_before_call": (
+            _format_cost_value(projected_cost) if projected_cost is not None else None
+        ),
+        "enforced": input_cost is not None,
+        "exceeded": projected_cost is not None and projected_cost > max_cost,
+    }
+
+
+def _format_cost_value(value: float | None) -> str | None:
+    if value is None:
+        return None
+    return f"${value:.6f}"
+
+
+def _cost_budget_block_status(cost_budget: dict) -> str | None:
+    if not cost_budget["enforced"]:
+        return "cost_budget_unavailable"
+    if cost_budget["exceeded"]:
+        return "cost_budget_exceeded"
+    return None
+
+
+def _print_cost_budget_block(cost_budget: dict) -> None:
+    if not cost_budget["enforced"]:
+        typer.secho(
+            "Cannot enforce cost budget: set AGENT_ZERO_INPUT_COST_PER_1M_TOKENS.",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        typer.echo("No model call made.")
+        return
+
+    typer.secho(
+        "Cost budget exceeded before model call: "
+        f"projected={cost_budget['projected_cost_before_call']}, "
+        f"max={cost_budget['max_cost']}.",
+        fg=typer.colors.RED,
+        err=True,
+    )
+    typer.echo("No model call made.")
+
+
+def _enforce_retry_cost_budget(
+    system_prompt: str,
+    user_prompt: str,
+    config,
+    max_cost: float | None,
+    spent_cost: float,
+) -> None:
+    cost_budget = _cost_budget_check(
+        system_prompt,
+        user_prompt,
+        config,
+        max_cost,
+        spent_cost=spent_cost,
+    )
+    status = _cost_budget_block_status(cost_budget) if cost_budget else None
+    if status is None:
+        return
+
+    _print_cost_budget_block(cost_budget)
+    raise typer.Exit(code=1 if status == "cost_budget_exceeded" else 2)
+
+
+def _tool_call_for_cost_budget(cost_budget: dict | None) -> dict:
+    if cost_budget is None:
+        return _tool_call_record(
+            "check_cost_budget",
+            "skipped",
+            output_summary="no max_cost",
+            duration_ms=0.0,
+        )
+
+    status = "success" if _cost_budget_block_status(cost_budget) is None else "failed"
+    output_summary = (
+        f"projected={cost_budget['projected_cost_before_call']}; "
+        f"max={cost_budget['max_cost']}; "
+        f"exceeded={cost_budget['exceeded']}"
+    )
+    if not cost_budget["enforced"]:
+        output_summary = "input cost is not configured"
+    return _tool_call_record(
+        "check_cost_budget",
+        status,
+        output_summary=output_summary,
+        duration_ms=0.0,
+    )
+
+
+def _model_calls_cost_value(model_calls: list[dict]) -> float:
+    total = 0.0
+    for call in model_calls:
+        usage = call.get("usage", {})
+        cost_value = _parse_cost_value(usage.get("estimated_cost"))
+        if cost_value is not None:
+            total += cost_value
+    return total
+
+
+def _finalize_cost_budget(
+    cost_budget: dict | None,
+    model_calls: list[dict],
+) -> dict | None:
+    if cost_budget is None:
+        return None
+
+    final_cost = _model_calls_cost_value(model_calls)
+    finalized = dict(cost_budget)
+    finalized["final_estimated_cost"] = (
+        _format_cost_value(final_cost) if model_calls else None
+    )
+    finalized["final_exceeded"] = (
+        final_cost > _parse_cost_value(cost_budget["max_cost"])
+        if model_calls and _parse_cost_value(cost_budget["max_cost"]) is not None
+        else False
+    )
+    finalized["model_calls"] = len(model_calls)
+    return finalized
+
+
 def _run_trace_json(
     mode: str,
     task: str,
@@ -340,6 +503,7 @@ def _run_trace_json(
     dry_run: bool = False,
     retries: list[dict] | None = None,
     tool_calls: list[dict] | None = None,
+    cost_budget: dict | None = None,
     error: str | None = None,
 ) -> dict:
     decision = repository_context.decision
@@ -373,6 +537,7 @@ def _run_trace_json(
         "dry_run": dry_run,
         "retries": retries or [],
         "tool_calls": tool_calls or [],
+        "cost_budget": cost_budget,
     }
     if error is not None:
         trace["error"] = error
@@ -401,6 +566,7 @@ def _code_clarification_trace_json(
         "dry_run": dry_run,
         "retries": [],
         "tool_calls": tool_calls or [],
+        "cost_budget": None,
     }
 
 
@@ -599,6 +765,12 @@ def ask(
         "--trace-json",
         help="Print a machine-readable run trace after the answer.",
     ),
+    max_cost: float | None = typer.Option(
+        None,
+        "--max-cost",
+        min=0.0,
+        help="Maximum estimated model cost allowed for this run.",
+    ),
 ) -> None:
     """Answer a repo-aware question without editing files."""
     started_at = _timer_start()
@@ -634,6 +806,50 @@ def ask(
         _print_context_selection(repository_context)
     if _trace_enabled(resolved_trace_level):
         _print_trace("ask", repository_context, config, resolved_trace_level)
+    cost_budget = _cost_budget_check(
+        ASK_SYSTEM_PROMPT,
+        user_prompt,
+        config,
+        max_cost,
+    )
+    if cost_budget is not None:
+        tool_calls.append(_tool_call_for_cost_budget(cost_budget))
+    cost_budget_status = (
+        _cost_budget_block_status(cost_budget) if cost_budget is not None else None
+    )
+    if cost_budget_status is not None:
+        _print_cost_budget_block(cost_budget)
+        started_at = _timer_start()
+        _record_memory(
+            mode="ask",
+            task=task,
+            selected_files=repository_context.decision.selected_files,
+            status=cost_budget_status,
+            success=False,
+        )
+        tool_calls.append(
+            _tool_call_record(
+                "record_memory",
+                "success",
+                output_summary=f"status={cost_budget_status}",
+                duration_ms=_duration_ms(started_at),
+            )
+        )
+        if trace_json:
+            _print_trace_json(
+                _run_trace_json(
+                    mode="ask",
+                    task=task,
+                    config=config,
+                    repository_context=repository_context,
+                    status=cost_budget_status,
+                    success=False,
+                    model_calls=[],
+                    tool_calls=tool_calls,
+                    cost_budget=cost_budget,
+                )
+            )
+        raise typer.Exit(code=1 if cost_budget_status == "cost_budget_exceeded" else 2)
     started_at = _timer_start()
     response = _complete_with_config(ASK_SYSTEM_PROMPT, user_prompt, config)
     tool_calls.append(
@@ -684,6 +900,7 @@ def ask(
                 success=True,
                 model_calls=model_calls,
                 tool_calls=tool_calls,
+                cost_budget=_finalize_cost_budget(cost_budget, model_calls),
             )
         )
 
@@ -722,6 +939,12 @@ def plan(
         "--trace-json",
         help="Print a machine-readable run trace after the plan.",
     ),
+    max_cost: float | None = typer.Option(
+        None,
+        "--max-cost",
+        min=0.0,
+        help="Maximum estimated model cost allowed for this run.",
+    ),
 ) -> None:
     """Inspect and produce an implementation plan."""
     started_at = _timer_start()
@@ -757,6 +980,50 @@ def plan(
         _print_context_selection(repository_context)
     if _trace_enabled(resolved_trace_level):
         _print_trace("plan", repository_context, config, resolved_trace_level)
+    cost_budget = _cost_budget_check(
+        PLAN_SYSTEM_PROMPT,
+        user_prompt,
+        config,
+        max_cost,
+    )
+    if cost_budget is not None:
+        tool_calls.append(_tool_call_for_cost_budget(cost_budget))
+    cost_budget_status = (
+        _cost_budget_block_status(cost_budget) if cost_budget is not None else None
+    )
+    if cost_budget_status is not None:
+        _print_cost_budget_block(cost_budget)
+        started_at = _timer_start()
+        _record_memory(
+            mode="plan",
+            task=task,
+            selected_files=repository_context.decision.selected_files,
+            status=cost_budget_status,
+            success=False,
+        )
+        tool_calls.append(
+            _tool_call_record(
+                "record_memory",
+                "success",
+                output_summary=f"status={cost_budget_status}",
+                duration_ms=_duration_ms(started_at),
+            )
+        )
+        if trace_json:
+            _print_trace_json(
+                _run_trace_json(
+                    mode="plan",
+                    task=task,
+                    config=config,
+                    repository_context=repository_context,
+                    status=cost_budget_status,
+                    success=False,
+                    model_calls=[],
+                    tool_calls=tool_calls,
+                    cost_budget=cost_budget,
+                )
+            )
+        raise typer.Exit(code=1 if cost_budget_status == "cost_budget_exceeded" else 2)
     started_at = _timer_start()
     response = _complete_with_config(PLAN_SYSTEM_PROMPT, user_prompt, config)
     tool_calls.append(
@@ -807,6 +1074,7 @@ def plan(
                 success=True,
                 model_calls=model_calls,
                 tool_calls=tool_calls,
+                cost_budget=_finalize_cost_budget(cost_budget, model_calls),
             )
         )
 
@@ -872,6 +1140,21 @@ def memory_command(
         "--detect-feedback",
         help="Detect feedback from text. Dry-run unless --yes is provided.",
     ),
+    review: bool = typer.Option(
+        False,
+        "--review",
+        help="Review candidate memory items with evidence and ids.",
+    ),
+    approve: str | None = typer.Option(
+        None,
+        "--approve",
+        help="Approve a memory item by id prefix, or use latest.",
+    ),
+    reject: str | None = typer.Option(
+        None,
+        "--reject",
+        help="Reject a memory item by id prefix, or use latest.",
+    ),
     yes: bool = typer.Option(
         False,
         "--yes",
@@ -894,9 +1177,9 @@ def memory_command(
         memory_items = [item for item in memory_items if item["status"] == status]
 
     if detect_feedback is not None:
-        if feedback is not None or prune or reset:
+        if feedback is not None or prune or reset or review or approve or reject:
             typer.secho(
-                "--detect-feedback cannot be combined with --feedback, --prune, or --reset.",
+                "--detect-feedback cannot be combined with other memory actions.",
                 fg=typer.colors.RED,
                 err=True,
             )
@@ -911,9 +1194,9 @@ def memory_command(
         return
 
     if feedback is not None:
-        if prune or reset:
+        if prune or reset or review or approve or reject:
             typer.secho(
-                "--feedback cannot be combined with --prune or --reset.",
+                "--feedback cannot be combined with other memory actions.",
                 fg=typer.colors.RED,
                 err=True,
             )
@@ -921,6 +1204,45 @@ def memory_command(
         _handle_memory_feedback(
             root=root,
             feedback=feedback,
+            status=status,
+            json_output=json_output,
+        )
+        return
+
+    if review:
+        if prune or reset or approve or reject:
+            typer.secho(
+                "--review cannot be combined with other memory actions.",
+                fg=typer.colors.RED,
+                err=True,
+            )
+            raise typer.Exit(code=2)
+        _handle_memory_review(
+            memory_items=memory_items,
+            json_output=json_output,
+            limit=limit,
+        )
+        return
+
+    if approve is not None or reject is not None:
+        if prune or reset:
+            typer.secho(
+                "--approve/--reject cannot be combined with --prune or --reset.",
+                fg=typer.colors.RED,
+                err=True,
+            )
+            raise typer.Exit(code=2)
+        if approve is not None and reject is not None:
+            typer.secho(
+                "Use either --approve or --reject, not both.",
+                fg=typer.colors.RED,
+                err=True,
+            )
+            raise typer.Exit(code=2)
+        _handle_memory_approval(
+            root=root,
+            selector=approve if approve is not None else reject,
+            approve=approve is not None,
             status=status,
             json_output=json_output,
         )
@@ -1072,6 +1394,107 @@ def _handle_memory_feedback(
     typer.echo(f"Updated memory status: {item['status']}")
     typer.echo(f"Confidence: {item['confidence']}")
     typer.echo(f"Claim: {item['claim']}")
+
+
+def _handle_memory_review(
+    memory_items: list[dict],
+    json_output: bool,
+    limit: int,
+) -> None:
+    candidates = [item for item in memory_items if item["status"] == "candidate"]
+    candidates = candidates[-limit:]
+
+    if json_output:
+        typer.echo(
+            json.dumps(
+                {
+                    "action": "review",
+                    "candidate_items": len(candidates),
+                    "items": candidates,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return
+
+    typer.echo(f"Candidate memory items: {len(candidates)}")
+    if not candidates:
+        typer.echo("- (none)")
+        return
+
+    for item in candidates:
+        _print_memory_review_item(item)
+
+
+def _handle_memory_approval(
+    root: Path,
+    selector: str | None,
+    approve: bool,
+    status: str | None,
+    json_output: bool,
+) -> None:
+    if selector is None:
+        selector = "latest"
+
+    if approve:
+        item = update_memory_item_status(
+            root,
+            selector=selector,
+            next_status="confirmed",
+            next_confidence="high",
+            event_type="user_approved",
+            status_filter=status,
+        )
+        action = "approve"
+    else:
+        item = update_memory_item_status(
+            root,
+            selector=selector,
+            next_status="rejected",
+            next_confidence="low",
+            event_type="user_rejected",
+            status_filter=status,
+        )
+        action = "reject"
+
+    if json_output:
+        typer.echo(
+            json.dumps(
+                {
+                    "action": action,
+                    "selector": selector,
+                    "updated": item is not None,
+                    "item": item,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return
+
+    if item is None:
+        typer.echo("No matching SQLite memory item found.")
+        return
+
+    action_label = "approved" if approve else "rejected"
+    typer.echo(f"Memory {action_label}: {item['id']}")
+    typer.echo(f"Updated memory status: {item['status']}")
+    typer.echo(f"Confidence: {item['confidence']}")
+    typer.echo(f"Claim: {item['claim']}")
+
+
+def _print_memory_review_item(item: dict) -> None:
+    typer.echo(f"- {item['id']} [{item.get('confidence', 'unknown')}]")
+    typer.echo(f"  claim: {item.get('claim', '(no claim)')}")
+    useful_files = item.get("useful_files") or []
+    if useful_files:
+        typer.echo(f"  files: {', '.join(useful_files)}")
+    evidence = item.get("evidence") or []
+    if evidence:
+        typer.echo(f"  evidence: {', '.join(evidence)}")
+    typer.echo("  approve: python -m agent_zero memory --approve " + item["id"][:8])
+    typer.echo("  reject: python -m agent_zero memory --reject " + item["id"][:8])
 
 
 def _handle_memory_detect_feedback(
@@ -1232,6 +1655,12 @@ def code(
         "--trace-json",
         help="Print a machine-readable run trace after code execution.",
     ),
+    max_cost: float | None = typer.Option(
+        None,
+        "--max-cost",
+        min=0.0,
+        help="Maximum estimated model cost allowed for this run.",
+    ),
 ) -> None:
     """Apply a focused code change and validate it."""
     resolved_trace_level = _resolve_trace_level(trace, trace_level)
@@ -1330,6 +1759,52 @@ def code(
         _print_trace("code", repository_context, config, resolved_trace_level)
     active_system_prompt = CODE_SYSTEM_PROMPT
     active_user_prompt = user_prompt
+    cost_budget = _cost_budget_check(
+        active_system_prompt,
+        active_user_prompt,
+        config,
+        max_cost,
+    )
+    if cost_budget is not None:
+        tool_calls.append(_tool_call_for_cost_budget(cost_budget))
+    cost_budget_status = (
+        _cost_budget_block_status(cost_budget) if cost_budget is not None else None
+    )
+    if cost_budget_status is not None:
+        _print_cost_budget_block(cost_budget)
+        started_at = _timer_start()
+        _record_memory(
+            mode="code",
+            task=task,
+            selected_files=repository_context.decision.selected_files,
+            status=cost_budget_status,
+            success=False,
+        )
+        tool_calls.append(
+            _tool_call_record(
+                "record_memory",
+                "success",
+                output_summary=f"status={cost_budget_status}",
+                duration_ms=_duration_ms(started_at),
+            )
+        )
+        if trace_json:
+            _print_trace_json(
+                _run_trace_json(
+                    mode="code",
+                    task=task,
+                    config=config,
+                    repository_context=repository_context,
+                    status=cost_budget_status,
+                    success=False,
+                    model_calls=[],
+                    classification=classification.to_dict(),
+                    dry_run=dry_run,
+                    tool_calls=tool_calls,
+                    cost_budget=cost_budget,
+                )
+            )
+        raise typer.Exit(code=1 if cost_budget_status == "cost_budget_exceeded" else 2)
     started_at = _timer_start()
     response = _complete_with_config(active_system_prompt, active_user_prompt, config)
     _print_code_trace("Model response received.", resolved_trace_level)
@@ -1401,6 +1876,7 @@ def code(
                         classification=classification.to_dict(),
                         dry_run=dry_run,
                         tool_calls=tool_calls,
+                        cost_budget=_finalize_cost_budget(cost_budget, model_calls),
                     )
                 )
             return
@@ -1445,6 +1921,7 @@ def code(
                     classification=classification.to_dict(),
                     dry_run=dry_run,
                     tool_calls=tool_calls,
+                    cost_budget=_finalize_cost_budget(cost_budget, model_calls),
                     error=str(exc),
                 )
             )
@@ -1484,6 +1961,8 @@ def code(
                 selected_files=repository_context.decision.selected_files,
                 usage=usage,
                 patch_summary=patch_summary,
+                max_cost=max_cost,
+                spent_cost=_model_calls_cost_value(model_calls),
             )
         )
         response = retry_response
@@ -1576,6 +2055,7 @@ def code(
                     dry_run=True,
                     retries=retries,
                     tool_calls=tool_calls,
+                    cost_budget=_finalize_cost_budget(cost_budget, model_calls),
                 )
             )
         return
@@ -1618,6 +2098,8 @@ def code(
             selected_files=repository_context.decision.selected_files,
             usage=usage,
             patch_summary=patch_summary,
+            max_cost=max_cost,
+            spent_cost=_model_calls_cost_value(model_calls),
         )
         response = retry_response
         diff_text = retry_diff_text
@@ -1692,6 +2174,8 @@ def code(
             validation_result=validation_result,
             config=config,
             trace_level=resolved_trace_level,
+            max_cost=max_cost,
+            spent_cost=_model_calls_cost_value(model_calls),
         )
 
     _print_usage(response, config, active_system_prompt, active_user_prompt)
@@ -1745,6 +2229,7 @@ def code(
                 dry_run=False,
                 retries=retries,
                 tool_calls=tool_calls,
+                cost_budget=_finalize_cost_budget(cost_budget, model_calls),
             )
         )
 
@@ -2585,10 +3070,19 @@ def _retry_after_empty_patch(
     selected_files: list[str],
     usage: dict,
     patch_summary: list[dict],
+    max_cost: float | None = None,
+    spent_cost: float = 0.0,
 ):
     typer.echo("")
     typer.echo("Attempting one empty-patch retry.")
     retry_prompt = _build_empty_patch_retry_prompt(task, user_prompt, previous_diff)
+    _enforce_retry_cost_budget(
+        FIX_EMPTY_PATCH_SYSTEM_PROMPT,
+        retry_prompt,
+        config,
+        max_cost,
+        spent_cost,
+    )
     response = _complete_with_config(
         FIX_EMPTY_PATCH_SYSTEM_PROMPT,
         retry_prompt,
@@ -2682,6 +3176,8 @@ def _retry_after_patch_application_failure(
     selected_files: list[str],
     usage: dict,
     patch_summary: list[dict],
+    max_cost: float | None = None,
+    spent_cost: float = 0.0,
 ):
     typer.echo("")
     typer.echo("Attempting one patch-application retry.")
@@ -2690,6 +3186,13 @@ def _retry_after_patch_application_failure(
         failed_diff=failed_diff,
         failure=failure,
         failed_summary=failed_summary,
+    )
+    _enforce_retry_cost_budget(
+        FIX_PATCH_APPLICATION_SYSTEM_PROMPT,
+        retry_prompt,
+        config,
+        max_cost,
+        spent_cost,
     )
     response = _complete_with_config(
         FIX_PATCH_APPLICATION_SYSTEM_PROMPT,
@@ -2873,6 +3376,8 @@ def _retry_after_validation_failure(
     validation_result: ValidationResult | None,
     config,
     trace_level: TraceLevel = "none",
+    max_cost: float | None = None,
+    spent_cost: float = 0.0,
 ) -> None:
     if validation_result is None:
         return
@@ -2881,6 +3386,13 @@ def _retry_after_validation_failure(
     typer.echo("Attempting one validation-fix retry.")
     retry_prompt = _build_validation_retry_prompt(
         task, changed_files, validation_result
+    )
+    _enforce_retry_cost_budget(
+        FIX_VALIDATION_SYSTEM_PROMPT,
+        retry_prompt,
+        config,
+        max_cost,
+        spent_cost,
     )
     response = _complete_with_config(FIX_VALIDATION_SYSTEM_PROMPT, retry_prompt, config)
     _print_code_trace("Retry model response received.", trace_level)
